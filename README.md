@@ -235,6 +235,8 @@ Custom command profiles are intended for connections that cannot be represented 
 
 Shellink starts the command in a PTY and exposes the same command, input, history, file-transfer, and editing APIs used by SSH sessions. An `expect` script can therefore drive several bastion hosts and authentication steps as one Shellink session. The script, its dependencies, and its credentials run on the server host as the daemon user; only execute trusted commands.
 
+> **Note:** Shellink itself does not handle a host's automatic login process. For automated login (multi-hop hops, jump-host menus, OTP prompts, and other interactive authentication flows), use an [`expect`](https://linux.die.net/man/1/expect) script driven by a `command` profile. Other tools such as `sshpass` (password-only logins) or `ssh` with key-based authentication and `ProxyJump`/`ProxyCommand` can also work, depending on your environment.
+
 ### Client and Server Modes
 
 #### Client mode

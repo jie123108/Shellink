@@ -235,6 +235,8 @@ shellink session close <session-id> --json
 
 Shellink 会在伪终端（PTY）中启动该命令，并暴露出与 SSH 会话相同的命令执行、输入、历史记录、文件传输与编辑 API。因此，一个 `expect` 脚本可以驱动多个跳板机（bastion host）与多步认证流程，将其整合为一个 Shellink 会话。该脚本、其依赖项以及其中的凭据（credential）都会以守护进程（daemon）所属用户的身份在服务器主机上运行；请只执行可信的命令。
 
+> **说明：** Shellink 本身不处理主机的自动登录过程。对于自动登录（多级跳转、跳板机菜单、一次性密码（OTP）提示以及其他交互式认证流程），建议使用由 `command` 类型连接配置驱动的 [`expect`](https://linux.die.net/man/1/expect) 脚本来处理。视具体环境，也可以使用其他工具，例如 `sshpass`（仅密码登录）或结合密钥认证与 `ProxyJump`/`ProxyCommand` 的 `ssh`。
+
 ### 客户端与服务端模式（Client and Server Modes）
 
 #### 客户端模式（Client mode）
