@@ -37,6 +37,13 @@ Pin a specific release tag instead of latest:
 sh /tmp/shellink-install.sh --version v0.1.0
 ```
 
+For a system-wide install (when the user wants `/usr/local/bin` or the
+default dir is not writable), run with `sudo`:
+
+```bash
+sudo sh /tmp/shellink-install.sh --dir /usr/local/bin
+```
+
 The script:
 
 - Detects OS/arch via `uname` and picks the matching release asset.
@@ -44,18 +51,15 @@ The script:
   the checksum.
 - Installs it as `$HOME/.local/bin/shellink` (override with `--dir DIR` or
   `SHELLINK_INSTALL_DIR`).
+- If the install directory is not on `PATH`, appends an `export PATH=...`
+  line to the user's shell profile (`~/.zshrc`, `~/.bashrc`, etc.).
 - Refuses to run on Windows and prints the source-build instructions instead.
 
-After it finishes, make sure `$HOME/.local/bin` is on `PATH` for the current
-shell (the script warns if it is not):
+After it finishes, verify in a new shell (or after exporting `PATH`):
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
 shellink -V
 ```
-
-If the user wants this permanent, add that `export` line to their shell
-profile (`~/.bashrc`, `~/.zshrc`, etc.) — ask before editing their dotfiles.
 
 ### Windows
 

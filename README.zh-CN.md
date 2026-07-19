@@ -148,10 +148,15 @@ cat /tmp/shellink-install.sh
 sh /tmp/shellink-install.sh --version v0.1.0
 ```
 
-脚本会从 GitHub Releases 下载对应平台二进制，校验 `SHA256SUMS.txt`，并安装为 `$HOME/.local/bin/shellink`。请确保该目录在 `PATH` 中：
+若要安装到系统目录 `/usr/local/bin`（多数系统已在 `PATH` 中），请用 `sudo` 运行：
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+sudo sh /tmp/shellink-install.sh --dir /usr/local/bin
+```
+
+脚本会从 GitHub Releases 下载对应平台二进制，校验 `SHA256SUMS.txt`，默认安装为 `$HOME/.local/bin/shellink`。若该目录不在 `PATH` 中，安装脚本会自动把 `export PATH=...` 写入你的 shell 配置（`~/.zshrc`、`~/.bashrc` 等）。打开新的 shell（或重新 export `PATH`）后验证：
+
+```bash
 shellink -V
 ```
 

@@ -148,10 +148,15 @@ cat /tmp/shellink-install.sh
 sh /tmp/shellink-install.sh --version v0.1.0
 ```
 
-The script downloads the matching asset from GitHub Releases, verifies `SHA256SUMS.txt`, and installs `shellink` to `$HOME/.local/bin`. Ensure that directory is on your `PATH`:
+For a system-wide install into `/usr/local/bin` (already on `PATH` on most systems), run with `sudo`:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+sudo sh /tmp/shellink-install.sh --dir /usr/local/bin
+```
+
+The script downloads the matching asset from GitHub Releases, verifies `SHA256SUMS.txt`, and installs `shellink` to `$HOME/.local/bin` by default. If that directory is not on `PATH`, the installer appends an `export PATH=...` line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.). Open a new shell (or re-export `PATH`), then verify:
+
+```bash
 shellink -V
 ```
 

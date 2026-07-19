@@ -8,9 +8,15 @@
 #   sh /tmp/shellink-install.sh --version v0.1.0
 #   ./install.sh [--version TAG] [--dir DIR]
 #
+# System-wide install (needs write access to the target dir):
+#   sudo sh /tmp/shellink-install.sh --dir /usr/local/bin
+#
 # Environment:
 #   SHELLINK_VERSION  Release tag (e.g. v0.1.0). Overrides default "latest".
 #   SHELLINK_INSTALL_DIR  Install directory (default: $HOME/.local/bin).
+#
+# After install, if the install dir is not on PATH, the script appends an
+# export line to the user's shell profile (~/.bashrc, ~/.zshrc, etc.).
 #
 # Windows is not supported; build from source instead:
 #   https://github.com/jie123108/Shellink#installation
@@ -20,10 +26,12 @@ set -eu
 REPO="jie123108/Shellink"
 GITHUB_API="https://api.github.com/repos/${REPO}"
 GITHUB_RELEASE="https://github.com/${REPO}/releases/download"
-DEFAULT_BIN_DIR="${HOME}/.local/bin"
-
 VERSION="${SHELLINK_VERSION:-}"
-BIN_DIR="${SHELLINK_INSTALL_DIR:-${DEFAULT_BIN_DIR}}"
+BIN_DIR="${SHELLINK_INSTALL_DIR:-}"
+BIN_DIR_SET=0
+if [ -n "$BIN_DIR" ]; then
+  BIN_DIR_SET=1
+fi
 
 usage() {
   cat <<'EOF'
@@ -31,6 +39,7 @@ Install Shellink CLI from GitHub Releases.
 
 Usage:
   install.sh [--version TAG] [--dir DIR]
+  sudo install.sh --dir /usr/local/bin
   install.sh --help
 
 Options:
@@ -41,6 +50,13 @@ Options:
 Environment:
   SHELLINK_VERSION       Same as --version
   SHELLINK_INSTALL_DIR   Same as --dir
+
+If the install directory is not on PATH, the script appends an export line
+to your shell profile (~/.zshrc, ~/.bashrc, etc.).
+
+For a system-wide binary under /usr/local/bin (usually already on PATH),
+run with sudo:
+  sudo sh install.sh --dir /usr/local/bin
 
 Supported platforms: macOS/Linux (x64, arm64).
 Windows is not supported; build from source (see repository README).
@@ -193,6 +209,115 @@ path_has_dir() {
   return 1
 }
 
+# Resolve the login user home when the script is run via sudo.
+install_home() {
+  if [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    home_dir=""
+    if command -v getent >/dev/null 2>&1; then
+      home_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    elif command -v dscl >/dev/null 2>&1; then
+      home_dir="$(dscl . -read "/Users/${SUDO_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+    fi
+    if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
+      printf '%s\n' "$home_dir"
+      return
+    fi
+  fi
+  printf '%s\n' "${HOME}"
+}
+
+profile_has_marker() {
+  profile="$1"
+  [ -f "$profile" ] || return 1
+  grep -F "shellink-installer:path" "$profile" >/dev/null 2>&1
+}
+
+detect_shell_profiles() {
+  home_dir="$1"
+  shell_name="$(basename "${SHELL:-}")"
+
+  case "$shell_name" in
+    zsh)
+      printf '%s\n' "${home_dir}/.zshrc"
+      ;;
+    bash)
+      if [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+        # macOS bash login shells read .bash_profile first.
+        printf '%s\n' "${home_dir}/.bash_profile"
+      else
+        printf '%s\n' "${home_dir}/.bashrc"
+      fi
+      ;;
+    fish)
+      printf '%s\n' "${home_dir}/.config/fish/config.fish"
+      ;;
+    *)
+      printf '%s\n' "${home_dir}/.profile"
+      ;;
+  esac
+}
+
+append_path_to_profile() {
+  profile="$1"
+  bin_dir="$2"
+
+  mkdir -p "$(dirname "$profile")"
+
+  if [ ! -e "$profile" ]; then
+    touch "$profile" || return 1
+  fi
+
+  if ! [ -w "$profile" ]; then
+    return 1
+  fi
+
+  {
+    printf '\n'
+    printf '# shellink-installer:path — keep Shellink CLI on PATH\n'
+    case "$profile" in
+      *.fish)
+        printf 'fish_add_path "%s"\n' "$bin_dir"
+        ;;
+      *)
+        printf 'export PATH="%s:$PATH"\n' "$bin_dir"
+        ;;
+    esac
+  } >>"$profile"
+
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    if command -v chown >/dev/null 2>&1; then
+      chown "${SUDO_USER}" "$profile" 2>/dev/null || true
+    fi
+  fi
+}
+
+ensure_path_configured() {
+  bin_dir="$1"
+  home_dir="$(install_home)"
+  profile="$(detect_shell_profiles "$home_dir")"
+
+  PATH="${bin_dir}:${PATH}"
+  export PATH
+
+  if profile_has_marker "$profile"; then
+    log "PATH already configured in ${profile}"
+    return 0
+  fi
+
+  if append_path_to_profile "$profile" "$bin_dir"; then
+    log "added PATH entry to ${profile}"
+    log "Restart your shell, or run: export PATH=\"${bin_dir}:\$PATH\""
+    return 0
+  fi
+
+  log "warning: could not write PATH into ${profile}"
+  log "Add this line manually:"
+  log "  export PATH=\"${bin_dir}:\$PATH\""
+  log "If the install directory requires root, re-run with sudo, for example:"
+  log "  sudo sh install.sh --dir /usr/local/bin"
+  return 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version)
@@ -203,6 +328,7 @@ while [ "$#" -gt 0 ]; do
     --dir)
       [ "$#" -ge 2 ] || die "--dir requires a value"
       BIN_DIR="$2"
+      BIN_DIR_SET=1
       shift 2
       ;;
     --help|-h)
@@ -222,9 +348,16 @@ need_cmd chmod
 need_cmd mv
 need_cmd awk
 need_cmd head
+need_cmd grep
+need_cmd touch
+need_cmd id
 
 if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   die "need curl or wget to download"
+fi
+
+if [ "$BIN_DIR_SET" -eq 0 ]; then
+  BIN_DIR="$(install_home)/.local/bin"
 fi
 
 ASSET="$(detect_target)"
@@ -243,18 +376,28 @@ download "${GITHUB_RELEASE}/${TAG}/${ASSET}" "$ASSET"
 download "${GITHUB_RELEASE}/${TAG}/SHA256SUMS.txt" "SHA256SUMS.txt"
 verify_checksum "SHA256SUMS.txt" "$ASSET"
 
-mkdir -p "$BIN_DIR"
+if ! mkdir -p "$BIN_DIR" 2>/dev/null; then
+  die "cannot create install directory ${BIN_DIR} (permission denied). Re-run with sudo, for example: sudo sh install.sh --dir /usr/local/bin"
+fi
 DEST="${BIN_DIR}/shellink"
-mv "$ASSET" "$DEST"
+if ! mv "$ASSET" "$DEST" 2>/dev/null; then
+  die "cannot write ${DEST} (permission denied). Re-run with sudo, for example: sudo sh install.sh --dir /usr/local/bin"
+fi
 chmod +x "$DEST"
+
+# Avoid leaving a root-owned binary in a normal user's ~/.local/bin after sudo.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+  if command -v chown >/dev/null 2>&1; then
+    chown "${SUDO_USER}" "$DEST" 2>/dev/null || true
+  fi
+fi
 
 log "installed: ${DEST}"
 
 if ! path_has_dir "$BIN_DIR"; then
   log ""
-  log "note: ${BIN_DIR} is not on PATH. Add it, for example:"
-  log "  export PATH=\"${BIN_DIR}:\$PATH\""
-  log "Then add that line to your shell profile (~/.bashrc, ~/.zshrc, etc.)."
+  log "note: ${BIN_DIR} is not on PATH; configuring shell profile..."
+  ensure_path_configured "$BIN_DIR" || true
 fi
 
 if "$DEST" -V >/dev/null 2>&1; then
@@ -264,4 +407,9 @@ else
   die "installed binary failed to run: ${DEST} -V"
 fi
 
-log "done. Run: shellink --help"
+if command -v shellink >/dev/null 2>&1; then
+  log "done. Run: shellink --help"
+else
+  log "done. Binary installed at ${DEST}"
+  log "Open a new shell (or export PATH) then run: shellink --help"
+fi
