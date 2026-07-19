@@ -1,0 +1,42 @@
+{
+  "name": "shellink",
+  "private": true,
+  "version": "0.1.0",
+  "description": "One stable CLI and daemon for SSH, local PTY sessions, file transfer, and remote editing — built for AI agents and humans alike.",
+  "license": "MIT",
+  "homepage": "https://github.com/jie123108/Shellink#readme",
+  "bugs": {
+    "url": "https://github.com/jie123108/Shellink/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jie123108/Shellink.git"
+  },
+  "workspaces": [
+    "protocol",
+    "cli",
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace=server & npm run dev --workspace=web & wait",
+    "dev:server": "npm run dev --workspace=server",
+    "dev:web": "npm run dev --workspace=web",
+    "build:runtime": "npm run build --workspace=web && node scripts/embed-web.mjs && npm run build --workspace=protocol && npm run build --workspace=server && npm run build --workspace=cli",
+    "build": "npm run build:runtime",
+    "build:binary": "npm run build:binary:current",
+    "build:binary:current": "npm run build:runtime && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --outfile=dist/shellink cli/dist/index.js",
+    "build:binary:macos-arm64": "npm run build:runtime && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-darwin-arm64 --outfile=dist/shellink-darwin-arm64 cli/dist/index.js",
+    "build:binary:macos-x64": "npm run build:runtime && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-darwin-x64 --outfile=dist/shellink-darwin-x64 cli/dist/index.js",
+    "build:binary:linux-arm64": "npm run build:runtime && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-linux-arm64 --outfile=dist/shellink-linux-arm64 cli/dist/index.js",
+    "build:binary:linux-x64": "npm run build:runtime && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-linux-x64 --outfile=dist/shellink-linux-x64 cli/dist/index.js",
+    "build:binary:all": "npm run build:runtime && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-darwin-arm64 --outfile=dist/shellink-darwin-arm64 cli/dist/index.js && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-darwin-x64 --outfile=dist/shellink-darwin-x64 cli/dist/index.js && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-linux-arm64 --outfile=dist/shellink-linux-arm64 cli/dist/index.js && bun build --compile --no-compile-autoload-dotenv --compile-autoload-package-json --target=bun-linux-x64 --outfile=dist/shellink-linux-x64 cli/dist/index.js",
+    "start": "npm run start --workspace=server",
+    "test:server": "npm run test --workspace=server",
+    "test:server:coverage": "npm run test:coverage --workspace=server",
+    "test:protocol": "npm run test --workspace=protocol"
+  }
+}

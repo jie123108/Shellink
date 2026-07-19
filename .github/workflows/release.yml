@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish (e.g. v0.1.0). Leave empty to use the current ref name.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Build binaries and publish GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *)
+              echo "Release tag must start with v (got: $TAG)" >&2
+              exit 1
+              ;;
+          esac
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building release assets for $TAG"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.19'
+          cache: npm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build standalone binaries
+        env:
+          SHELLINK_VERSION: ${{ steps.meta.outputs.tag }}
+        run: npm run build:binary:all
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for name in \
+            shellink-darwin-arm64 \
+            shellink-darwin-x64 \
+            shellink-linux-arm64 \
+            shellink-linux-x64
+          do
+            src="dist/${name}"
+            test -f "$src"
+            chmod +x "$src"
+            cp "$src" "release-assets/${name}"
+          done
+          (
+            cd release-assets
+            sha256sum shellink-* > SHA256SUMS.txt
+          )
+          ls -lah release-assets
+
+      - name: Smoke test linux-x64 binary
+        run: |
+          ./release-assets/shellink-linux-x64 --help
+          ./release-assets/shellink-linux-x64 -V
+
+      - name: Build release notes from CHANGELOG.md
+        run: |
+          node scripts/extract-release-notes.mjs \
+            "${{ steps.meta.outputs.version }}" \
+            release-assets/RELEASE_NOTES.md
+          echo '----- RELEASE NOTES -----'
+          cat release-assets/RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Shellink ${{ steps.meta.outputs.version }}
+          body_path: release-assets/RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
+          # Append GitHub's auto commit/PR summary after the CHANGELOG section.
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/shellink-darwin-arm64
+            release-assets/shellink-darwin-x64
+            release-assets/shellink-linux-arm64
+            release-assets/shellink-linux-x64
+            release-assets/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

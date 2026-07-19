@@ -1,0 +1,7 @@
+{
+  "name": "smoke-command",
+  "connectType": "command",
+  "command": "/bin/sh",
+  "cols": 80,
+  "rows": 24
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shellink iTerm2 Import"
+  short_description: "Import iTerm2 profiles into Shellink"
+  default_prompt: "Use $shellink-iterm2-import to scan and import local iTerm2 profiles into Shellink."

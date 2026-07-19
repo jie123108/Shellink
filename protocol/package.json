@@ -1,0 +1,28 @@
+{
+  "name": "@shellink/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../scripts/inject-version.mjs && tsc -p tsconfig.json",
+    "typecheck": "node ../scripts/inject-version.mjs && tsc --noEmit",
+    "test": "node ../scripts/inject-version.mjs && vitest run"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.4"
+  }
+}

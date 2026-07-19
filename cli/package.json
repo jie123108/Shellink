@@ -1,0 +1,25 @@
+{
+  "name": "@shellink/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "shellink": "dist/index.js" },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "0.80.10",
+    "@shellink/protocol": "0.1.0",
+    "@shellink/server": "0.1.0",
+    "@xterm/headless": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.4"
+  }
+}

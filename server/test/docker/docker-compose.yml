@@ -1,0 +1,62 @@
+services:
+  target:
+    build:
+      context: ../..
+      dockerfile: test/docker/target/Dockerfile
+    container_name: shellink-test-target
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "2222:22"
+    healthcheck:
+      test: ["CMD", "sshd", "-t"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
+
+  bastion:
+    build:
+      context: ../..
+      dockerfile: test/docker/bastion/Dockerfile
+    container_name: shellink-test-bastion
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "2223:22"
+    depends_on:
+      target:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "sshd", "-t"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
+
+  local-ct:
+    build:
+      context: ../..
+      dockerfile: test/docker/local-ct/Dockerfile
+    container_name: shellink-test-local-ct
+    # Keep container alive for docker exec
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  blackhole:
+    build:
+      context: ../..
+      dockerfile: test/docker/blackhole/Dockerfile
+    container_name: shellink-test-blackhole
+    ports:
+      - "2224:22"
+    healthcheck:
+      test: ["CMD-SHELL", "pidof socat >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
