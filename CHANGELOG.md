@@ -24,6 +24,39 @@ The GitHub Release body is generated from the matching section in this file
 
 ### Removed
 
+## [0.2.0] - 2026-07-26
+
+### Added
+
+- **Non-blocking session jobs:** Long-running `exec` / `edit` / transfer work can detach from the foreground RPC, with job status polling, cancel, and stderr heartbeats so agent hosts with short request windows (e.g. ~30s) do not time out mid-operation. Documented in agent-doc and CLI help.
+- **`shellink upgrade`:** Self-upgrade from GitHub Releases with download progress, daemon stop/restart handling, `--check` / `--version` / `--yes`, and machine-readable `--json` output.
+- **Install PATH setup:** `install.sh` appends the install directory to the user shell profile when it is missing from `PATH`, with guidance for system-wide (sudo) installs.
+- **Build commit in version output:** Binaries embed a short git commit (`GIT_COMMIT`). Shown by `shellink version` and `shellink server status` / `restart` / `start` (and `system.hello` as `serviceCommit`).
+
+### Changed
+
+- Lower default timeouts for foreground `exec` / `edit` so typical agent calls finish inside short host windows; use detach jobs for longer work.
+- Raise SSH `keepaliveCountMax` so long PTY transfers are less likely to be dropped around ~45s of idle-looking traffic.
+- Clarify in docs that Shellink does not implement a host's automatic login flow; use `expect`, `sshpass`, or `ProxyJump` for those cases.
+
+### Fixed
+
+- Correct edit-operation timeout inversion that could cut edits short or wait incorrectly.
+- Slow uploads no longer treat session `IDLE` as decode completion; verification uses the remaining transfer timeout budget.
+
+### Downloads
+
+Standalone binaries for:
+
+- `shellink-darwin-arm64` (macOS Apple Silicon)
+- `shellink-darwin-x64` (macOS Intel)
+- `shellink-linux-arm64`
+- `shellink-linux-x64`
+
+Verify downloads with `SHA256SUMS.txt`.
+
+Full documentation: [README.md](https://github.com/jie123108/Shellink/blob/v0.2.0/README.md) · [中文文档](https://github.com/jie123108/Shellink/blob/v0.2.0/README.zh-CN.md)
+
 ## [0.1.0] - 2026-07-19
 
 First public release of Shellink — an open-source session middleware for AI
