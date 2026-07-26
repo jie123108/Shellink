@@ -19,6 +19,14 @@
 
 </div>
 
+<div align="center">
+
+<img src="docs/screenshots/shellink-agent-jump.gif" alt="AI 智能体通过跳板机跳转并操作目标服务器" width="720" />
+
+*AI 智能体经跳板机跳转后，直接通过 Shellink CLI 在目标服务器上执行命令。*
+
+</div>
+
 Shellink 是一个面向 AI 智能体（AI Agent）与人类用户的开源会话中间件（session middleware），用于操作 SSH 与本地终端会话（session）。它提供统一稳定的命令行（CLI）来管理连接配置（profile）、交互式会话、命令执行、文件传输、远程编辑与会话状态。本地守护进程（daemon）负责持有会话，并对外提供浏览器友好的 Web 控制台，以及兼容的 HTTP 和 WebSocket API。
 
 代码仓库：<https://github.com/jie123108/Shellink>
@@ -36,6 +44,7 @@ Shellink 是一个面向 AI 智能体（AI Agent）与人类用户的开源会�
   - [技术栈（Technology Stack）](#技术栈technology-stack)
   - [安装（Installation）](#安装installation)
     - [安装预编译二进制（推荐）](#安装预编译二进制推荐)
+    - [升级](#升级)
     - [从源码安装](#从源码安装)
   - [快速开始（Quick Start）](#快速开始quick-start)
   - [使用方法（Usage）](#使用方法usage)
@@ -158,6 +167,30 @@ sudo sh /tmp/shellink-install.sh --dir /usr/local/bin
 
 ```bash
 shellink -V
+```
+
+### 升级
+
+已安装的独立二进制可通过 GitHub Releases 升级：
+
+```bash
+shellink upgrade --check
+shellink upgrade
+```
+
+指定版本或跳过确认：
+
+```bash
+shellink upgrade --version v0.2.0
+shellink upgrade --yes
+```
+
+`shellink upgrade` 仅支持 Bun 预编译安装。源码安装请自行 rebuild，或重跑 `install.sh`。
+下载进度会输出到 stderr，临时网络故障会自动重试。若 GitHub 访问缓慢或不可用，配置代理后重试：
+
+```bash
+export HTTPS_PROXY=http://127.0.0.1:7890
+shellink upgrade
 ```
 
 ### 从源码安装

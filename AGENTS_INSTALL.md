@@ -109,7 +109,14 @@ npx skills add jie123108/Shellink --skill shellink-cli --agent codex
 npx skills add jie123108/Shellink --skill shellink-cli --agent pi
 ```
 
-To update an existing install:
+To update the Shellink **binary** after a prebuilt install:
+
+```bash
+shellink upgrade --check
+shellink upgrade --yes
+```
+
+To update an existing **skill** install:
 
 ```bash
 npx skills update shellink-cli

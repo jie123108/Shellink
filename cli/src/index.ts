@@ -5,9 +5,13 @@ import { connectDaemon, ensureDaemon, readLogTail, runForeground } from './daemo
 import { runTui } from './tui.js'
 import { formatHelp } from './help.js'
 import { resolveCliLocale, t } from './i18n.js'
+import { UpgradeError, formatUpgradeResult, runUpgrade } from './upgrade.js'
+import { createProgressReporter } from './progress.js'
 
 const locale = resolveCliLocale()
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'version', 'no-newline', 'yes'])
+// `version` is intentionally not boolean so `shellink upgrade --version TAG` works;
+// bare `--version` / `-V` still become true when no value follows.
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'no-newline', 'yes', 'check'])
 
 type Flags = Record<string, string | boolean>
 
@@ -103,6 +107,27 @@ async function handleServer(action: string | undefined, flags: Flags): Promise<v
   throw new UsageError(`shellink server start|status|stop|restart|logs|run (${t(locale, 'usage')})`)
 }
 
+async function handleUpgrade(flags: Flags): Promise<void> {
+  if (flags.version === true) {
+    throw new UsageError(t(locale, 'upgradeVersionRequiresTag'))
+  }
+  const targetVersion = typeof flags.version === 'string' ? flags.version : undefined
+  const progress = createProgressReporter({
+    stream: process.stderr,
+    isTty: Boolean(process.stderr.isTTY),
+    enabled: flags.json !== true,
+    locale,
+  })
+  const result = await runUpgrade({
+    checkOnly: flags.check === true,
+    targetVersion,
+    yes: flags.yes === true,
+    locale,
+    progress,
+  })
+  output(flags.json === true ? result : formatUpgradeResult(result), flags.json === true)
+}
+
 async function handleRpc(words: string[], flags: Flags): Promise<void> {
   const [group, action, id] = words
   const json = flags.json === true
@@ -154,6 +179,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const { words, flags } = parse(argv)
   const [group, action] = words
 
+  if (group === 'upgrade') {
+    noExtraWords(words, 1)
+    if (flags.help === true) { printHelp('upgrade'); return }
+    await handleUpgrade(flags)
+    return
+  }
   if (flags.version === true || group === 'version') {
     output(flags.json === true ? { name: 'shellink', version: VERSION, protocolVersion: PROTOCOL_VERSION } : `Shellink ${VERSION}\nProtocol ${PROTOCOL_VERSION}`, flags.json === true)
     return
@@ -170,6 +201,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 main().catch((error) => {
   if (error instanceof UsageError) { console.error(error.message); process.exitCode = 2; return }
+  if (error instanceof UpgradeError) { console.error(error.message); process.exitCode = error.exitCode; return }
   if (error instanceof AppError && error.status === 400) { console.error(error.message); process.exitCode = 2; return }
   console.error(error instanceof Error ? error.message : error)
   process.exitCode = 1

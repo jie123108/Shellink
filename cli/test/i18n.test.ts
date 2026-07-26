@@ -13,5 +13,8 @@ describe('CLI localization', () => {
     expect(formatHelp('profile', 'en-US', '0.1.0')).toContain('List or search profiles')
     expect(formatHelp('profile', 'zh-CN', '0.1.0')).toContain('列出或搜索配置')
     expect(formatHelp('profile', 'en-US', '0.1.0')).toContain('create --input <FILE|->')
+    expect(formatHelp('upgrade', 'en-US', '0.1.0')).toContain('shellink upgrade')
+    expect(formatHelp('upgrade', 'zh-CN', '0.1.0')).toContain('--check')
+    expect(formatHelp('root', 'en-US', '0.1.0')).toContain('upgrade')
   })
 })

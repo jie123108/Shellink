@@ -50,6 +50,14 @@ Create or update Profiles with \`--input FILE\` or \`--input -\`. Credentials mu
 
 Remote edit requires an AUTO session in WAITING_INPUT. Each \`oldText\` must be non-empty and match exactly once, including whitespace. Multiple edits must not overlap. Pass the same JSON with \`--input -\` to read it from stdin.
 
+## Upgrade
+
+Upgrade the standalone binary from GitHub Releases (use \`--yes\` when non-interactive):
+
+    shellink upgrade --check --json
+    shellink upgrade --yes --json
+    shellink upgrade --version v0.2.0 --yes --json
+
 Exit codes: 0 success, 1 runtime/service error, 2 argument or validation error.
 Credentials belong in JSON passed with \`--input FILE\` or \`--input -\`, never command-line arguments.
 `
@@ -74,5 +82,6 @@ export const AGENT_DOC_JSON = {
     session: ['list', 'create', 'state', 'history', 'input', 'exec', 'mode', 'close', 'remove-record', 'download', 'upload', 'edit'],
     webhook: ['list', 'create', 'delete'],
     server: ['start', 'status', 'stop', 'restart', 'logs', 'run'],
+    upgrade: ['--check', '--version', '--yes'],
   },
 }

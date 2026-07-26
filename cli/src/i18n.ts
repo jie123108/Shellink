@@ -51,6 +51,7 @@ const messages = {
     missing: '缺少 {label}', extraArguments: '多余参数: {arguments}', readJsonFailed: '无法读取 JSON 输入: {message}',
     invalidNumber: '无效数字: {value}', unknownCommand: '未知命令: {command}', daemonStartTimeout: 'daemon 启动超时', logTail: '日志末尾:',
     daemonClosed: 'daemon 连接已关闭', daemonNotConnected: '未连接 daemon', requestTimedOut: '{method} 请求超时',
+    upgradeVersionRequiresTag: 'upgrade 的 --version 需要版本号，例如: shellink upgrade --version v0.2.0',
   },
   'en-US': {
     sessions: 'Sessions', profiles: 'Profiles', openTerminal: 'Open terminal', createAndOpen: 'Create and open',
@@ -97,6 +98,7 @@ const messages = {
     missing: 'Missing {label}', extraArguments: 'Extra arguments: {arguments}', readJsonFailed: 'Unable to read JSON input: {message}',
     invalidNumber: 'Invalid number: {value}', unknownCommand: 'Unknown command: {command}', daemonStartTimeout: 'Timed out starting daemon', logTail: 'Log tail:',
     daemonClosed: 'Daemon connection closed', daemonNotConnected: 'Not connected to the daemon', requestTimedOut: '{method} request timed out',
+    upgradeVersionRequiresTag: 'upgrade --version requires a tag, for example: shellink upgrade --version v0.2.0',
   },
 } as const
 

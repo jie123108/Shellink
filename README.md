@@ -19,6 +19,14 @@
 
 </div>
 
+<div align="center">
+
+<img src="docs/screenshots/shellink-agent-jump.gif" alt="An AI agent hopping through a jump host to work on the target server via Shellink" width="720" />
+
+*An AI agent hops through a jump host and runs commands on the target server — driven entirely through the Shellink CLI.*
+
+</div>
+
 Shellink is an open-source session middleware for AI agents and humans working with SSH and local terminal sessions. It provides one stable CLI for connection profiles, interactive sessions, command execution, file transfer, remote editing, and session state. A local daemon owns the sessions and exposes a browser-friendly Web UI plus HTTP and WebSocket compatibility APIs.
 
 Repository: <https://github.com/jie123108/Shellink>
@@ -36,6 +44,7 @@ Repository: <https://github.com/jie123108/Shellink>
   - [Technology Stack](#technology-stack)
   - [Installation](#installation)
     - [Install binary (recommended)](#install-binary-recommended)
+    - [Upgrade](#upgrade)
     - [From source](#from-source)
   - [Quick Start](#quick-start)
   - [Usage](#usage)
@@ -158,6 +167,30 @@ The script downloads the matching asset from GitHub Releases, verifies `SHA256SU
 
 ```bash
 shellink -V
+```
+
+### Upgrade
+
+Upgrade an existing standalone binary from GitHub Releases:
+
+```bash
+shellink upgrade --check
+shellink upgrade
+```
+
+Pin a release tag or skip the confirmation prompt:
+
+```bash
+shellink upgrade --version v0.2.0
+shellink upgrade --yes
+```
+
+`shellink upgrade` only supports Bun prebuilt installs. Source installs should rebuild, or re-run `install.sh`.
+It displays download progress on stderr and retries transient network failures automatically. If GitHub is slow or unreachable, configure a proxy before retrying:
+
+```bash
+export HTTPS_PROXY=http://127.0.0.1:7890
+shellink upgrade
 ```
 
 ### From source

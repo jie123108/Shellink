@@ -63,6 +63,15 @@ shellink -V
 shellink server status --json
 ```
 
+To upgrade an existing standalone binary:
+
+```bash
+shellink upgrade --check --json
+shellink upgrade --yes --json
+```
+
+`npx skills update shellink-cli` only updates this skill, not the `shellink` binary.
+
 ## Operate sessions
 
 Always read the installed command reference before operating sessions or

@@ -15,6 +15,7 @@ const help = {
   profile      管理连接配置
   session      管理终端会话
   webhook      管理状态回调
+  upgrade      从 GitHub Releases 升级二进制
   agent-doc    输出 AI Agent 使用文档
   version      输出版本信息
   help         输出帮助
@@ -25,6 +26,17 @@ const help = {
   -V, --version 输出版本信息
 
 运行 shellink <命令> --help 查看详细帮助。`,
+    upgrade: `用法: shellink upgrade [选项]
+
+从 GitHub Releases 下载并替换当前独立二进制，必要时重启 daemon。
+仅支持 Bun 预编译安装；源码安装请自行 rebuild，或重跑 install.sh。
+下载进度输出到 stderr；网络失败会自动重试最多 3 次。
+
+选项:
+  --check              只检查是否有更新，不下载
+  --version TAG        升级到指定 release tag（如 v0.2.0）
+  --yes                跳过确认（非交互环境必须）
+  --json               输出单行 JSON`,
     server: `用法: shellink server <start|status|stop|restart|logs|run> [选项]
 
 命令:
@@ -83,6 +95,7 @@ Commands:
   profile      Manage connection profiles
   session      Manage terminal sessions
   webhook      Manage status callbacks
+  upgrade      Upgrade the binary from GitHub Releases
   agent-doc    Print AI agent documentation
   version      Print version information
   help         Print help
@@ -93,6 +106,20 @@ Global options:
   -V, --version Print version information
 
 Run shellink <command> --help for detailed help.`,
+    upgrade: `Usage: shellink upgrade [options]
+
+Download and replace the current standalone binary from GitHub Releases,
+restarting the daemon when it was running.
+Only supported for Bun prebuilt installs; rebuild from source or re-run
+install.sh for other installs.
+Download progress is written to stderr; network failures are retried up to
+three times automatically.
+
+Options:
+  --check              Check for updates without downloading
+  --version TAG        Upgrade to a specific release tag (e.g. v0.2.0)
+  --yes                Skip confirmation (required when non-interactive)
+  --json               Print single-line JSON`,
     server: `Usage: shellink server <start|status|stop|restart|logs|run> [options]
 
 Commands:
