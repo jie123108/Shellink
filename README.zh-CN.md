@@ -389,10 +389,10 @@ python3 skills/shellink-iterm2-import/scripts/import_iterm2.py --guid <guid>
 | `SHELLINK_MAX_FRAME_BYTES` | 最大 RPC 载荷大小 | `16777216` |
 | `SHELLINK_SOCKET_MAX_QUEUE_BYTES` | 每个 Unix 套接字客户端在触发反压（backpressure）前的最大缓冲字节数 | `4194304` |
 | `SHELLINK_SILENCE_MS` | 用于状态检测的静默期阈值 | `800` |
-| `SHELLINK_EXEC_TIMEOUT_MS` | 默认命令执行超时时间 | `30000` |
+| `SHELLINK_EXEC_TIMEOUT_MS` | 默认命令执行超时时间 | `20000` |
 | `SHELLINK_TRANSFER_MAX_BYTES` | 上传/下载的最大文件大小 | `6291456` |
 | `SHELLINK_TRANSFER_TIMEOUT_MS` | 默认文件传输超时时间 | `120000` |
-| `SHELLINK_EDIT_TIMEOUT_MS` | 默认远程编辑超时时间 | `60000` |
+| `SHELLINK_EDIT_TIMEOUT_MS` | 默认远程编辑超时时间 | `25000` |
 | `SHELLINK_SSH_READY_TIMEOUT_MS` | SSH 就绪超时时间 | `30000` |
 
 生产环境中，请显式设置 `SHELLINK_MASTER_KEY`，并在数据库的整个生命周期内保持其不变。自动生成的密钥会以受限权限存储在 `$SHELLINK_HOME/master.key` 中。

@@ -392,10 +392,10 @@ It requires Python 3.9 or newer and an available `shellink` executable. Review s
 | `SHELLINK_MAX_FRAME_BYTES` | Maximum RPC payload | `16777216` |
 | `SHELLINK_SOCKET_MAX_QUEUE_BYTES` | Maximum buffered bytes per Unix-socket client before backpressure | `4194304` |
 | `SHELLINK_SILENCE_MS` | Quiet-period threshold for state detection | `800` |
-| `SHELLINK_EXEC_TIMEOUT_MS` | Default command timeout | `30000` |
+| `SHELLINK_EXEC_TIMEOUT_MS` | Default command timeout | `20000` |
 | `SHELLINK_TRANSFER_MAX_BYTES` | Maximum upload/download size | `6291456` |
 | `SHELLINK_TRANSFER_TIMEOUT_MS` | Default transfer timeout | `120000` |
-| `SHELLINK_EDIT_TIMEOUT_MS` | Default remote-edit timeout | `60000` |
+| `SHELLINK_EDIT_TIMEOUT_MS` | Default remote-edit timeout | `25000` |
 | `SHELLINK_SSH_READY_TIMEOUT_MS` | SSH readiness timeout | `30000` |
 
 For production, set `SHELLINK_MASTER_KEY` explicitly and keep it stable for the lifetime of the database. The generated key is stored as `$SHELLINK_HOME/master.key` with restrictive permissions.

@@ -80,10 +80,10 @@ export const config = {
   maxFrameBytes,
   socketMaxQueueBytes: Number(process.env.SHELLINK_SOCKET_MAX_QUEUE_BYTES ?? 4 * 1024 * 1024),
   silenceThresholdMs: Number(process.env.SHELLINK_SILENCE_MS ?? 800),
-  execDefaultTimeoutMs: Number(process.env.SHELLINK_EXEC_TIMEOUT_MS ?? 30_000),
+  execDefaultTimeoutMs: Number(process.env.SHELLINK_EXEC_TIMEOUT_MS ?? 20_000),
   transferMaxBytes,
   transferTimeoutMs: Number(process.env.SHELLINK_TRANSFER_TIMEOUT_MS ?? 120_000),
-  editTimeoutMs: Number(process.env.SHELLINK_EDIT_TIMEOUT_MS ?? 60_000),
+  editTimeoutMs: Number(process.env.SHELLINK_EDIT_TIMEOUT_MS ?? 25_000),
   sshReadyTimeoutMs: Number(process.env.SHELLINK_SSH_READY_TIMEOUT_MS ?? 30_000),
 }
 

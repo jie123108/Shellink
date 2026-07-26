@@ -83,3 +83,21 @@ shellink agent-doc
 
 Add `--json` for stable machine-readable output. A command starts the user
 daemon automatically.
+
+## Long-running operations
+
+Host agents (e.g. Cursor) wait only ~30s for a shell command before
+backgrounding it. Keep every CLI call short: for anything that may exceed
+~25s, use `--detach` and poll the returned job.
+
+```bash
+shellink session exec '<id>' --command 'long-build' --detach --json
+shellink session exec-status '<job-id>' --since <cursor> --wait 20000 --json
+# repeat until status is DONE / FAILED / CANCELED; use --since <cursor> each call
+shellink session exec-cancel '<job-id>' --json   # abort with Ctrl+C
+```
+
+`upload`, `download`, and `edit` also accept `--detach`; poll their jobs with
+`session exec-status`. Do not use synchronous calls that may block beyond ~25s.
+If a command returns `METHOD_NOT_FOUND`, run `shellink server restart` to
+upgrade the daemon.

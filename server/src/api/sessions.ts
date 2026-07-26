@@ -40,6 +40,42 @@ export function registerSessionRoutes(app: FastifyInstance): void {
   app.post('/api/sessions/:id/exec', async (req, reply) => {
     try { return await sessionService.exec({ id: (req.params as { id: string }).id, ...(req.body as object) }) } catch (error) { return sendError(reply, error) }
   })
+  app.post('/api/sessions/:id/exec-start', async (req, reply) => {
+    try { return sessionService.execStart({ id: (req.params as { id: string }).id, ...(req.body as object) }) } catch (error) { return sendError(reply, error) }
+  })
+  app.post('/api/sessions/:id/exec-status', async (req, reply) => {
+    try { return await sessionService.execStatus(req.body as object) } catch (error) { return sendError(reply, error) }
+  })
+  app.post('/api/sessions/:id/exec-cancel', async (req, reply) => {
+    try { return await sessionService.execCancel(req.body as object) } catch (error) { return sendError(reply, error) }
+  })
+  app.post('/api/sessions/:id/upload-start', async (req, reply) => {
+    const id = (req.params as { id: string }).id
+    const query = req.query as { path?: string; timeoutMs?: string; sha256?: string }
+    if (!query.path?.trim()) return reply.code(400).send({ error: 'Missing query parameter: path' })
+    try {
+      const file = await req.file()
+      if (!file) return reply.code(400).send({ error: 'Missing multipart field: file' })
+      const result = sessionService.uploadStart({ id, path: query.path, data: await file.toBuffer(), timeoutMs: timeout(query.timeoutMs, config.transferTimeoutMs), sha256: query.sha256?.trim() || undefined })
+      return result
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      if (/file size|Request file too large|FST_REQ_FILE_TOO_LARGE/i.test(message)) return reply.code(413).send({ error: `File is too large; limit is ${config.transferMaxBytes} bytes` })
+      return sendError(reply, error)
+    }
+  })
+  app.post('/api/sessions/:id/download-start', async (req, reply) => {
+    const id = (req.params as { id: string }).id
+    const body = req.body as { path?: string; output?: string; timeoutMs?: number }
+    if (!body.path?.trim() || !body.output?.trim()) return reply.code(400).send({ error: 'Missing path or output' })
+    try { return sessionService.downloadStart({ id, path: body.path, output: body.output, timeoutMs: body.timeoutMs }) } catch (error) { return sendError(reply, error) }
+  })
+  app.post('/api/sessions/:id/edit-start', async (req, reply) => {
+    const id = (req.params as { id: string }).id
+    const body = req.body as { path?: string; edits?: Array<{ oldText: string; newText: string }>; timeoutMs?: number }
+    if (!body.path || !Array.isArray(body.edits) || body.edits.length === 0) return reply.code(400).send({ error: 'Invalid parameters' })
+    try { return sessionService.editStart({ id, path: body.path, edits: body.edits, timeoutMs: body.timeoutMs }) } catch (error) { return sendError(reply, error) }
+  })
   app.get('/api/sessions/:id/download', async (req, reply) => {
     const id = (req.params as { id: string }).id
     const query = req.query as { path?: string; timeoutMs?: string }

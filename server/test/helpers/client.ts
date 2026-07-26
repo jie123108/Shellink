@@ -152,6 +152,59 @@ export class TestClient {
     })
   }
 
+  async execStart(id: string, command: string, timeoutMs?: number) {
+    return this.request('POST', `/shellink/api/sessions/${id}/exec-start`, {
+      body: { command, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
+    })
+  }
+
+  async execStatus(sessionId: string, jobId: string, since = 0, waitMs = 0) {
+    return this.request('POST', `/shellink/api/sessions/${sessionId}/exec-status`, {
+      body: { jobId, since, waitMs },
+    })
+  }
+
+  async execCancel(sessionId: string, jobId: string) {
+    return this.request('POST', `/shellink/api/sessions/${sessionId}/exec-cancel`, {
+      body: { jobId },
+    })
+  }
+
+  async downloadStart(id: string, remotePath: string, output: string, timeoutMs?: number) {
+    return this.request('POST', `/shellink/api/sessions/${id}/download-start`, {
+      body: { path: remotePath, output, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
+    })
+  }
+
+  async editStart(
+    id: string,
+    remotePath: string,
+    edits: Array<{ oldText: string; newText: string }>,
+    timeoutMs?: number,
+  ) {
+    return this.request('POST', `/shellink/api/sessions/${id}/edit-start`, {
+      body: { path: remotePath, edits, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
+    })
+  }
+
+  async uploadStart(id: string, remotePath: string, data: Buffer, opts?: { sha256?: string; timeoutMs?: number }) {
+    const boundary = '----ShellinkTestBoundary'
+    const filename = 'upload.bin'
+    const head =
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+      `Content-Type: application/octet-stream\r\n\r\n`
+    const tail = `\r\n--${boundary}--\r\n`
+    const rawBody = Buffer.concat([Buffer.from(head), data, Buffer.from(tail)])
+    const q = new URLSearchParams({ path: remotePath })
+    if (opts?.sha256) q.set('sha256', opts.sha256)
+    if (opts?.timeoutMs) q.set('timeoutMs', String(opts.timeoutMs))
+    return this.request('POST', `/shellink/api/sessions/${id}/upload-start?${q}`, {
+      rawBody,
+      contentType: `multipart/form-data; boundary=${boundary}`,
+    })
+  }
+
   async setMode(id: string, mode: 'AUTO' | 'MANUAL') {
     return this.request('POST', `/shellink/api/sessions/${id}/mode`, { body: { mode } })
   }

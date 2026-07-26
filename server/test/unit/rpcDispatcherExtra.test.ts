@@ -34,11 +34,18 @@ describe('RpcDispatcher error paths', () => {
   it('runs system.ping, system.status, and system.stop', async () => {
     const dispatcher = new RpcDispatcher(new SystemService())
     expect((await dispatcher.dispatch('system.ping', {}, sink)) as { pong: boolean }).toMatchObject({ pong: true })
-    expect((await dispatcher.dispatch('system.status', {}, sink)) as { pid: number; version: string }).toMatchObject({
+    expect((await dispatcher.dispatch('system.status', {}, sink)) as { pid: number; version: string; commit: string }).toMatchObject({
       pid: process.pid,
       version: expect.any(String),
+      commit: expect.any(String),
       protocolVersion: PROTOCOL_VERSION,
     })
+    const hello = (await dispatcher.dispatch('system.hello', { protocolVersion: PROTOCOL_VERSION }, sink)) as {
+      serviceVersion: string
+      serviceCommit: string
+    }
+    expect(hello.serviceVersion.length).toBeGreaterThan(0)
+    expect(hello.serviceCommit.length).toBeGreaterThan(0)
     expect((await dispatcher.dispatch('system.stop', {}, sink)) as { stopping: boolean }).toMatchObject({
       stopping: true,
     })
@@ -90,9 +97,15 @@ describe('RpcDispatcher full method coverage', () => {
     await call('sessions.history', { id: bogusId })
     await call('sessions.input', { id: bogusId, text: 'echo hi' })
     await call('sessions.exec', { id: bogusId, command: 'echo hi', timeoutMs: 1000 })
+    await call('sessions.execStart', { id: bogusId, command: 'echo hi', timeoutMs: 1000 })
+    await call('sessions.execStatus', { jobId: 'nopejob1', since: 0, waitMs: 0 })
+    await call('sessions.execCancel', { jobId: 'nopejob1' })
     await call('sessions.download', { id: bogusId, path: '/tmp/x' })
     await call('sessions.upload', { id: bogusId, path: '/tmp/x', data: new TextEncoder().encode('hi') })
     await call('sessions.edit', { id: bogusId, path: '/tmp/x', edits: [{ oldText: 'a', newText: 'b' }] })
+    await call('sessions.uploadStart', { id: bogusId, path: '/tmp/x', data: new TextEncoder().encode('hi') })
+    await call('sessions.downloadStart', { id: bogusId, path: '/tmp/x', output: '/tmp/out' })
+    await call('sessions.editStart', { id: bogusId, path: '/tmp/x', edits: [{ oldText: 'a', newText: 'b' }] })
     await call('sessions.mode', { id: bogusId, mode: 'MANUAL' })
     await call('sessions.resize', { id: bogusId, cols: 100, rows: 30 })
     await call('sessions.removeRecord', { id: bogusId })
@@ -117,7 +130,12 @@ describe('SystemService', () => {
     expect(status.pid).toBe(process.pid)
     expect(typeof status.version).toBe('string')
     expect(status.version.length).toBeGreaterThan(0)
+    expect(typeof status.commit).toBe('string')
+    expect(status.commit.length).toBeGreaterThan(0)
     expect(status.protocolVersion).toBe(PROTOCOL_VERSION)
+    const hello = svc.hello()
+    expect(hello.serviceCommit).toBe(status.commit)
+    expect(hello.serviceVersion).toBe(status.version)
     expect(typeof status.uptimeSeconds).toBe('number')
     expect(svc.stop().stopping).toBe(true)
     await new Promise((r) => setImmediate(r))

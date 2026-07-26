@@ -339,7 +339,9 @@ export class FileTransfer {
       }
       session.write(`\n${eof}\n`)
 
-      const { timedOut } = await session.waitForStable(remaining)
+      // Heredoc decode is silent until the prompt returns; do not treat IDLE as done
+      // or a slow link will "finish" while bytes are still in flight.
+      const { timedOut } = await session.waitForStable(remaining, { acceptIdle: false })
       void this.historySource.history(session.id, startSeq, 50_000)
       if (timedOut) {
         await this.execCapture(
@@ -350,6 +352,7 @@ export class FileTransfer {
         throw new TransferError('Upload decoding timed out', 504)
       }
 
+      const verifyTimeoutMs = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
       const verify = await this.execCapture(
         session,
         [
@@ -357,7 +360,7 @@ export class FileTransfer {
           `echo SP_UP:$(wc -c < ${quotedDest} | tr -d ' ')`,
           'stty echo 2>/dev/null || true',
         ].join('; '),
-        Math.min(timeoutMs, 30_000),
+        verifyTimeoutMs,
       )
       if (verify.timedOut) throw new TransferError('Upload verification timed out', 504)
       const vm = lastLineMarker(verify.output, /SP_UP:(\d+)/)

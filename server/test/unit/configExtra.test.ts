@@ -136,9 +136,9 @@ describe('config defaults when optional env vars are unset', () => {
       expect(mod.config.host).toBe('127.0.0.1')
       expect(mod.config.token).toBe('change-me')
       expect(mod.config.silenceThresholdMs).toBe(800)
-      expect(mod.config.execDefaultTimeoutMs).toBe(30_000)
+      expect(mod.config.execDefaultTimeoutMs).toBe(20_000)
       expect(mod.config.transferTimeoutMs).toBe(120_000)
-      expect(mod.config.editTimeoutMs).toBe(60_000)
+      expect(mod.config.editTimeoutMs).toBe(25_000)
       expect(mod.config.sshReadyTimeoutMs).toBe(30_000)
     } finally {
       for (const k of keys) {

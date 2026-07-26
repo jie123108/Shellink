@@ -8,6 +8,7 @@ export type SessionLockKind = 'exec' | 'transfer'
  */
 export class SessionOpLock {
   private locks = new Map<string, SessionLockKind>()
+  private describeBusy?: (sessionId: string) => string
 
   isLocked(sessionId: string): boolean {
     return this.locks.has(sessionId)
@@ -17,6 +18,11 @@ export class SessionOpLock {
     return this.locks.get(sessionId)
   }
 
+  /** Install a callback that produces a conflict message naming the currently running job, if any. */
+  setBusyDescriber(describe: ((sessionId: string) => string) | undefined): void {
+    this.describeBusy = describe
+  }
+
   async withLock<T>(
     sessionId: string,
     fn: () => Promise<T>,
@@ -24,7 +30,8 @@ export class SessionOpLock {
     kind: SessionLockKind = 'transfer',
   ): Promise<T> {
     if (this.locks.has(sessionId)) {
-      throw new TransferError(busyMessage, 409)
+      const message = this.describeBusy ? this.describeBusy(sessionId) : busyMessage
+      throw new TransferError(message, 409)
     }
     this.locks.set(sessionId, kind)
     try {

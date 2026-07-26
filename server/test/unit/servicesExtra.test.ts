@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { AppError, RpcErrorCode } from '@shellink/protocol'
 import { buildApp } from '../../src/app.js'
+import { config } from '../../src/config.js'
 import { TransferError } from '../../src/core/TransferError.js'
 import { profileService } from '../../src/services/ProfileService.js'
 import { sessionService } from '../../src/services/SessionService.js'
@@ -119,6 +120,29 @@ describe('WebhookService validation', () => {
     expect(res.statusCode).toBe(400)
     await app.close()
     resetDb()
+  })
+})
+
+describe('SessionService job method validation', () => {
+  it('rejects invalid params for execStart/execStatus/execCancel/uploadStart/downloadStart/editStart', async () => {
+    expect(() => sessionService.execStart({})).toThrow(AppError)
+    expect(() => sessionService.execStart({ id: 'missing', command: 'echo' })).toThrow(AppError)
+    await expect(sessionService.execStatus({})).rejects.toBeInstanceOf(AppError)
+    await expect(sessionService.execCancel({})).rejects.toBeInstanceOf(AppError)
+    await expect(sessionService.execStatus({ jobId: 'missing' })).rejects.toBeInstanceOf(AppError)
+    await expect(sessionService.execCancel({ jobId: 'missing' })).rejects.toBeInstanceOf(AppError)
+    expect(() => sessionService.uploadStart({})).toThrow(AppError)
+    expect(() => sessionService.downloadStart({})).toThrow(AppError)
+    expect(() => sessionService.downloadStart({ id: 'missing', path: '/tmp/x', output: '/tmp/y' })).toThrow(AppError)
+    expect(() => sessionService.editStart({})).toThrow(AppError)
+    expect(() => sessionService.editStart({ id: 'missing', path: '/tmp/x', edits: [{ oldText: 'a', newText: 'b' }] })).toThrow(AppError)
+  })
+
+  it('rejects oversized uploadStart payloads with 413', () => {
+    const big = new Uint8Array(config.transferMaxBytes + 1)
+    expect(() =>
+      sessionService.uploadStart({ id: 'x', path: '/tmp/x', data: big }),
+    ).toThrow(AppError)
   })
 })
 

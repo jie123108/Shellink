@@ -8,6 +8,7 @@ export interface RpcEvent { subscriptionId: string; event: string; data: unknown
 
 export interface HelloResult {
   serviceVersion: string
+  serviceCommit: string
   protocolVersion: number
   capabilities: string[]
 }

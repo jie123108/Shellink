@@ -59,4 +59,23 @@ describe('SessionOpLock', () => {
     lock.clear('s1')
     await expect(lock.withLock('s1', async () => 'ok')).resolves.toBe('ok')
   })
+
+  it('uses setBusyDescriber for conflict messages', async () => {
+    const lock = new SessionOpLock()
+    lock.setBusyDescriber((sid) => `busy-job on ${sid}`)
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const first = lock.withLock('s1', async () => {
+      await gate
+    })
+    await expect(lock.withLock('s1', async () => 'nope')).rejects.toMatchObject({
+      message: 'busy-job on s1',
+      statusCode: 409,
+    })
+    release()
+    await first
+    lock.setBusyDescriber(undefined)
+  })
 })

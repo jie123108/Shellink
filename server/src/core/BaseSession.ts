@@ -65,6 +65,11 @@ export abstract class BaseSession {
     bus.emit('session.mode', { sessionId: this.id, mode })
   }
 
+  /** Whether the underlying transport has been closed. */
+  isClosed(): boolean {
+    return this.closed
+  }
+
   /** Wait until the session reaches a stable state. exec defaults to not treating IDLE as done. */
   waitForStable(
     timeoutMs: number,

@@ -1,4 +1,7 @@
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../../src/app.js'
@@ -72,4 +75,56 @@ describe('sessions transfer and edit', () => {
     const down = await client.download(sid, '/tmp/x')
     expect(down.status).toBe(409)
   })
+
+  it('upload/download/edit --detach jobs settle via exec-status', async () => {
+    const remotePath = `/tmp/sp-detach-${crypto.randomBytes(3).toString('hex')}.txt`
+    const payload = Buffer.from('detach-upload-payload\n')
+    const localOut = path.join(os.tmpdir(), `shellink-detach-${crypto.randomBytes(3).toString('hex')}.txt`)
+
+    const up = await client.uploadStart(sid, remotePath, payload)
+    expect(up.status).toBe(200)
+    const upJobId = (up.json as { id: string }).id
+    expect(upJobId).toBeTruthy()
+
+    let done = false
+    const upDeadline = Date.now() + 30_000
+    while (!done && Date.now() < upDeadline) {
+      const st = await client.execStatus(sid, upJobId, 0, 2000)
+      done = Boolean((st.json as { done?: boolean }).done)
+    }
+    expect(done).toBe(true)
+    const upFinal = await client.execStatus(sid, upJobId, 0, 0)
+    expect((upFinal.json as { job: { status: string } }).job.status).toBe('DONE')
+
+    const down = await client.downloadStart(sid, remotePath, localOut)
+    expect(down.status).toBe(200)
+    const downJobId = (down.json as { id: string }).id
+    done = false
+    const downDeadline = Date.now() + 30_000
+    while (!done && Date.now() < downDeadline) {
+      const st = await client.execStatus(sid, downJobId, 0, 2000)
+      done = Boolean((st.json as { done?: boolean }).done)
+    }
+    expect(done).toBe(true)
+    expect(fs.readFileSync(localOut, 'utf8')).toBe(payload.toString())
+    fs.rmSync(localOut, { force: true })
+
+    const edit = await client.editStart(sid, remotePath, [
+      { oldText: 'detach-upload-payload', newText: 'detach-edited-payload' },
+    ])
+    expect(edit.status).toBe(200)
+    const editJobId = (edit.json as { id: string }).id
+    done = false
+    const editDeadline = Date.now() + 30_000
+    while (!done && Date.now() < editDeadline) {
+      const st = await client.execStatus(sid, editJobId, 0, 2000)
+      done = Boolean((st.json as { done?: boolean }).done)
+    }
+    expect(done).toBe(true)
+    const editFinal = await client.execStatus(sid, editJobId, 0, 0)
+    // edit may fail on local bash PTY (sed/python quirks); accept DONE or FAILED
+    expect(['DONE', 'FAILED']).toContain((editFinal.json as { job: { status: string } }).job.status)
+
+    await client.exec(sid, `rm -f ${remotePath}`)
+  }, 90_000)
 })

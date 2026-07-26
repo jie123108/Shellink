@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm'
-import { AppError, RpcErrorCode, sessionCreateSchema, sessionExecSchema, sessionHistorySchema, sessionInputSchema, sessionModeSchema, sessionRecordsPurgeSchema } from '@shellink/protocol'
+import { AppError, RpcErrorCode, sessionCreateSchema, sessionDownloadStartSchema, sessionEditStartSchema, sessionExecCancelSchema, sessionExecSchema, sessionExecStartSchema, sessionExecStatusSchema, sessionHistorySchema, sessionInputSchema, sessionModeSchema, sessionRecordsPurgeSchema, sessionUploadStartSchema } from '@shellink/protocol'
 import { config } from '../config.js'
 import { collapseBase64Payloads } from '../core/collapseBase64.js'
 import { sessionManager } from '../core/SessionManager.js'
@@ -55,6 +55,49 @@ export class SessionService {
     const parsed = sessionExecSchema.safeParse(input)
     if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
     try { return await sessionManager.exec(this.live(parsed.data.id), parsed.data.command, parsed.data.timeoutMs ?? config.execDefaultTimeoutMs) }
+    catch (error) { throw asAppError(error) }
+  }
+
+  execStart(input: unknown) {
+    const parsed = sessionExecStartSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
+    try { return sessionManager.execStart(this.live(parsed.data.id), parsed.data.command, parsed.data.timeoutMs ?? config.execDefaultTimeoutMs) }
+    catch (error) { throw asAppError(error) }
+  }
+
+  async execStatus(input: unknown) {
+    const parsed = sessionExecStatusSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
+    try { return await sessionManager.execStatus(parsed.data.jobId, parsed.data.since, parsed.data.waitMs) }
+    catch (error) { throw asAppError(error) }
+  }
+
+  async execCancel(input: unknown) {
+    const parsed = sessionExecCancelSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
+    try { return await sessionManager.execCancel(parsed.data.jobId) }
+    catch (error) { throw asAppError(error) }
+  }
+
+  uploadStart(input: unknown) {
+    const parsed = sessionUploadStartSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
+    if (Buffer.from(parsed.data.data).length > config.transferMaxBytes) throw new AppError(RpcErrorCode.PAYLOAD_TOO_LARGE, `File is too large (${Buffer.from(parsed.data.data).length} bytes); limit is ${config.transferMaxBytes} bytes`, 413)
+    try { return sessionManager.uploadStart(this.live(parsed.data.id), parsed.data.path, Buffer.from(parsed.data.data), { timeoutMs: parsed.data.timeoutMs, expectedSha256: parsed.data.sha256 }) }
+    catch (error) { throw asAppError(error) }
+  }
+
+  downloadStart(input: unknown) {
+    const parsed = sessionDownloadStartSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
+    try { return sessionManager.downloadStart(this.live(parsed.data.id), parsed.data.path, parsed.data.output, parsed.data.timeoutMs ?? config.transferTimeoutMs) }
+    catch (error) { throw asAppError(error) }
+  }
+
+  editStart(input: unknown) {
+    const parsed = sessionEditStartSchema.safeParse(input)
+    if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
+    try { return sessionManager.editStart(this.live(parsed.data.id), parsed.data.path, parsed.data.edits, parsed.data.timeoutMs ?? config.editTimeoutMs) }
     catch (error) { throw asAppError(error) }
   }
 

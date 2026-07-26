@@ -58,6 +58,38 @@ export const sessionExecSchema = z.object({
   command: z.string().min(1),
   timeoutMs: z.number().int().min(1000).max(600_000).optional(),
 })
+export const sessionExecStartSchema = z.object({
+  id: z.string().min(1),
+  command: z.string().min(1),
+  timeoutMs: z.number().int().min(1000).max(600_000).optional(),
+})
+export const sessionExecStatusSchema = z.object({
+  jobId: z.string().min(1),
+  since: z.number().int().min(0).default(0),
+  waitMs: z.number().int().min(0).max(120_000).default(0),
+})
+export const sessionExecCancelSchema = z.object({
+  jobId: z.string().min(1),
+})
+export const sessionUploadStartSchema = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  data: z.instanceof(Uint8Array),
+  timeoutMs: z.number().int().optional(),
+  sha256: z.string().optional(),
+})
+export const sessionDownloadStartSchema = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  output: z.string().min(1),
+  timeoutMs: z.number().int().optional(),
+})
+export const sessionEditStartSchema = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  edits: z.array(z.object({ oldText: z.string().min(1), newText: z.string() })).min(1),
+  timeoutMs: z.number().int().optional(),
+})
 export const sessionModeSchema = z.object({ id: z.string().min(1), mode: z.enum(['AUTO', 'MANUAL']) })
 export const sessionResizeSchema = z.object({
   id: z.string().min(1),

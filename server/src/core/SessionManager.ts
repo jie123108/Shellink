@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import fs from 'node:fs'
 import { and, asc, eq, gt, ne } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { decryptSecret } from '../db/crypto.js'
@@ -9,6 +10,7 @@ import { LocalPtySession } from './LocalPtySession.js'
 import { FileTransfer, type DownloadResult, type TransferMeta } from './FileTransfer.js'
 import { RemoteEdit, type RemoteEditResult, type TextEdit } from './RemoteEdit.js'
 import { SessionOpLock } from './SessionOpLock.js'
+import { ExecJobRegistry, type JobSnapshot, type JobStatus } from './ExecJobRegistry.js'
 import { TransferError } from './TransferError.js'
 import { resolveSshPrivateKey } from './sshIdentity.js'
 import { stripAnsi } from './ansi.js'
@@ -22,10 +24,28 @@ export interface CreateSessionOptions {
 }
 
 export interface ExecResult {
+  jobId: string
+  status: JobStatus
   state: string
   output: string
+  startSeq: number
+  cursor: number
   durationMs: number
   timedOut: boolean
+}
+
+export interface ExecStartResult {
+  jobId: string
+  status: JobStatus
+  startSeq: number
+  state: string
+}
+
+export interface ExecStatusResult {
+  job: JobSnapshot
+  output: string
+  cursor: number
+  done: boolean
 }
 
 /** 8 位字母数字会话 ID（排除易混淆字符 0/O/1/I/l） */
@@ -43,10 +63,12 @@ function generateSessionId(): string {
 class SessionManager {
   private sessions = new Map<string, BaseSession>()
   private readonly opLock = new SessionOpLock()
+  readonly jobs = new ExecJobRegistry()
   readonly fileTransfer = new FileTransfer(this, this.opLock)
   readonly remoteEdit = new RemoteEdit(this, this.opLock)
 
   constructor() {
+    this.opLock.setBusyDescriber((sid) => this.lockBusyMessage(sid))
     // SQLite 同步写入，事件处理完成即已持久化。
     bus.on('session.data', (e) => {
       db.insert(schema.historyChunks)
@@ -84,6 +106,7 @@ class SessionManager {
         .run()
       this.fileTransfer.clearSession(e.sessionId)
       this.remoteEdit.clearSession(e.sessionId)
+      this.jobs.clearSession(e.sessionId)
       this.opLock.clear(e.sessionId)
       this.sessions.delete(e.sessionId)
     })
@@ -310,14 +333,75 @@ class SessionManager {
     throw new TransferError(`Session state is ${session.state}; input is not currently allowed`, 409)
   }
 
-  /** 同步执行：写入命令并等待会话回到稳定状态，返回本次输出 */
+  /** 同步执行：写入命令并等待会话回到稳定状态，返回本次输出。超时时也返回 jobId 与 cursor，便于轮询续接。 */
   async exec(
     session: BaseSession,
     command: string,
     timeoutMs = config.execDefaultTimeoutMs,
   ): Promise<ExecResult> {
+    const job = this.startExecJob(session, command, timeoutMs)
+    const startAt = job.startedAt
+    const settled = await this.jobs.waitUntilNotRunning(job.id, timeoutMs + 1000)
+    const status = settled?.status ?? 'DISCONNECTED'
+    // Lock conflicts settle the job as FAILED with the 409 message; surface that to the caller.
+    if (status === 'FAILED' && settled?.error) {
+      throw new TransferError(settled.error, 409)
+    }
+    const state = settled?.state ?? session.state
+    const { text } = this.history(session.id, job.startSeq, 10_000)
+    const cursor = session.lastSeq
+    return {
+      jobId: job.id,
+      status,
+      state,
+      output: text,
+      startSeq: job.startSeq,
+      cursor,
+      durationMs: Date.now() - startAt,
+      timedOut: status === 'TIMED_OUT',
+    }
+  }
+
+  /** 启动一个 exec 作业并立即返回，不等待完成。 */
+  execStart(session: BaseSession, command: string, timeoutMs = config.execDefaultTimeoutMs): ExecStartResult {
+    const job = this.startExecJob(session, command, timeoutMs)
+    return { jobId: job.id, status: job.status, startSeq: job.startSeq, state: session.state }
+  }
+
+  /** 查询 exec 作业状态；长轮询最多等待 waitMs 直到作业进入终态。返回自 since 之后的增量输出。 */
+  async execStatus(jobId: string, since: number, waitMs = 0): Promise<ExecStatusResult> {
+    const job = this.jobs.get(jobId)
+    if (!job) throw new TransferError('Job not found', 404)
+    const final = await this.jobs.waitUntilTerminal(jobId, waitMs)
+    const current = final ?? this.jobs.get(jobId) ?? job
+    const { text, cursor } = this.history(current.sessionId, since, 10_000)
+    const done = current.status === 'DONE' || current.status === 'CANCELED' || current.status === 'DISCONNECTED' || current.status === 'FAILED'
+    return { job: current, output: text, cursor, done }
+  }
+
+  /** 取消一个 exec 作业：向 PTY 发送 Ctrl+C，并标记为 CANCELED。 */
+  async execCancel(jobId: string): Promise<JobSnapshot> {
+    const job = this.jobs.get(jobId)
+    if (!job) throw new TransferError('Job not found', 404)
+    if (job.status === 'DONE' || job.status === 'CANCELED' || job.status === 'DISCONNECTED') {
+      return job
+    }
+    const session = this.sessions.get(job.sessionId)
+    if (session && !session.isClosed()) {
+      try { session.write('\u0003') } catch { /* session may be closing */ }
+    }
+    this.jobs.settle(jobId, 'CANCELED')
+    return this.jobs.get(jobId) ?? job
+  }
+
+  /** 创建 exec 作业并启动后台运行器（在 opLock 下持有锁直到命令真正结束）。 */
+  private startExecJob(session: BaseSession, command: string, timeoutMs: number): JobSnapshot {
     if (session.mode === 'MANUAL') {
       throw new TransferError('Session is in MANUAL mode; AI input was rejected', 409)
+    }
+    // Prefer the lock-busy hint over a generic state error when another job still holds the session.
+    if (this.opLock.isLocked(session.id)) {
+      throw new TransferError(this.lockBusyMessage(session.id), 409)
     }
     if (session.state !== 'WAITING_INPUT') {
       throw new TransferError(
@@ -325,28 +409,50 @@ class SessionManager {
         409,
       )
     }
-    return this.opLock.withLock(
+    const startSeq = session.lastSeq
+    const job = this.jobs.create(session.id, 'exec', { command, startSeq, timeoutMs })
+    void this.runExecJob(job, session, command, timeoutMs).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      const status = error instanceof TransferError && error.statusCode === 409 ? 'FAILED' : 'DISCONNECTED'
+      this.jobs.settle(job.id, status, { error: message })
+    })
+    return job
+  }
+
+  private async runExecJob(job: JobSnapshot, session: BaseSession, command: string, timeoutMs: number): Promise<void> {
+    await this.opLock.withLock(
       session.id,
       async () => {
-        if (session.state === 'DISCONNECTED') {
-          throw new TransferError('Session is disconnected', 404)
+        if (session.state === 'DISCONNECTED' || session.isClosed()) {
+          this.jobs.settle(job.id, 'DISCONNECTED')
+          return
         }
-        const startSeq = session.lastSeq
-        const startAt = Date.now()
         session.write(command.endsWith('\n') || command.endsWith('\r') ? command : command + '\n')
         // 慢输出间隙会进 IDLE；exec 必须等到 prompt（WAITING_INPUT）或断开
-        const { state, timedOut } = await session.waitForStable(timeoutMs, { acceptIdle: false })
-        const { text } = this.history(session.id, startSeq, 10_000)
-        return {
-          state,
-          output: text,
-          durationMs: Date.now() - startAt,
-          timedOut,
+        const first = await session.waitForStable(timeoutMs, { acceptIdle: false })
+        this.jobs.touchState(job.id, first.state)
+        if (!first.timedOut) {
+          this.jobs.settle(job.id, 'DONE', { state: first.state })
+          return
         }
+        this.jobs.settle(job.id, 'TIMED_OUT', { state: first.state })
+        // 超时后远端命令可能仍在运行；继续持有锁直到真正回到 prompt 或断开，
+        // 避免后续 exec 与仍在运行的命令交错。
+        const followUp = await session.waitForStable(24 * 60 * 60 * 1000, { acceptIdle: false })
+        this.jobs.touchState(job.id, followUp.state)
+        this.jobs.settle(job.id, followUp.timedOut ? 'TIMED_OUT' : 'DONE', { state: followUp.state })
       },
-      'This session is performing another operation; try again later',
+      this.lockBusyMessage(session.id),
       'exec',
     )
+  }
+
+  /** 构造带当前运行作业提示的 opLock 冲突消息。 */
+  private lockBusyMessage(sessionId: string): string {
+    const active = this.jobs.activeForSession(sessionId)
+    if (!active) return 'This session is performing another operation; try again later'
+    const what = active.command ? `exec: ${active.command.slice(0, 80)}` : `${active.kind} operation`
+    return `This session is running a ${what} (job ${active.id}, status ${active.status}); poll 'session exec-status ${active.id}' or cancel with 'session exec-cancel ${active.id}'`
   }
 
   async download(
@@ -375,6 +481,72 @@ class SessionManager {
     return this.remoteEdit.edit(session, remotePath, edits, timeoutMs)
   }
 
+  /** 启动一个 detach 上传作业并立即返回。 */
+  uploadStart(
+    session: BaseSession,
+    remotePath: string,
+    data: Buffer,
+    opts: { timeoutMs?: number; expectedSha256?: string } = {},
+  ): JobSnapshot {
+    const timeoutMs = opts.timeoutMs ?? config.transferTimeoutMs
+    const job = this.jobs.create(session.id, 'upload', { remotePath, startSeq: session.lastSeq, timeoutMs })
+    void this.runUploadJob(job, session, remotePath, data, opts)
+    return this.jobs.get(job.id) ?? job
+  }
+
+  /** 启动一个 detach 下载作业并立即返回；完成后由 daemon 将文件写入 outputLocalPath。 */
+  downloadStart(
+    session: BaseSession,
+    remotePath: string,
+    outputLocalPath: string,
+    timeoutMs = config.transferTimeoutMs,
+  ): JobSnapshot {
+    const job = this.jobs.create(session.id, 'download', { remotePath, startSeq: session.lastSeq, timeoutMs })
+    void this.runDownloadJob(job, session, remotePath, outputLocalPath, timeoutMs)
+    return this.jobs.get(job.id) ?? job
+  }
+
+  /** 启动一个 detach 远程编辑作业并立即返回。 */
+  editStart(
+    session: BaseSession,
+    remotePath: string,
+    edits: TextEdit[],
+    timeoutMs = config.editTimeoutMs,
+  ): JobSnapshot {
+    const job = this.jobs.create(session.id, 'edit', { remotePath, startSeq: session.lastSeq, timeoutMs })
+    void this.runEditJob(job, session, remotePath, edits, timeoutMs)
+    return this.jobs.get(job.id) ?? job
+  }
+
+  private async runUploadJob(job: JobSnapshot, session: BaseSession, remotePath: string, data: Buffer, opts: { timeoutMs?: number; expectedSha256?: string }): Promise<void> {
+    try {
+      const result = await this.fileTransfer.upload(session, remotePath, data, opts)
+      this.jobs.settle(job.id, 'DONE', { state: session.state, result })
+    } catch (error) {
+      this.jobs.settle(job.id, 'FAILED', { state: session.state, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  private async runDownloadJob(job: JobSnapshot, session: BaseSession, remotePath: string, outputLocalPath: string, timeoutMs: number): Promise<void> {
+    try {
+      const result = await this.fileTransfer.download(session, remotePath, timeoutMs)
+      fs.writeFileSync(outputLocalPath, Buffer.from(result.data))
+      const meta: Record<string, unknown> = { ...result, data: undefined, output: outputLocalPath }
+      this.jobs.settle(job.id, 'DONE', { state: session.state, result: meta })
+    } catch (error) {
+      this.jobs.settle(job.id, 'FAILED', { state: session.state, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  private async runEditJob(job: JobSnapshot, session: BaseSession, remotePath: string, edits: TextEdit[], timeoutMs: number): Promise<void> {
+    try {
+      const result = await this.remoteEdit.edit(session, remotePath, edits, timeoutMs)
+      this.jobs.settle(job.id, 'DONE', { state: session.state, result })
+    } catch (error) {
+      this.jobs.settle(job.id, 'FAILED', { state: session.state, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   /**
    * 彻底删除会话记录（含历史输出）。
    * 若仍在活跃则先关闭。供 Web 端在携带有效 token 时调用。
@@ -390,6 +562,7 @@ class SessionManager {
     db.delete(schema.sessions).where(eq(schema.sessions.id, sessionId)).run()
     this.fileTransfer.clearSession(sessionId)
     this.remoteEdit.clearSession(sessionId)
+    this.jobs.clearSession(sessionId)
     this.opLock.clear(sessionId)
     this.sessions.delete(sessionId)
     return true

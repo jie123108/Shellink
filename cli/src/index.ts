@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
-import { AGENT_DOC, AGENT_DOC_JSON, AppError, PROTOCOL_VERSION, VERSION } from '@shellink/protocol'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { AGENT_DOC, AGENT_DOC_JSON, AppError, GIT_COMMIT, PROTOCOL_VERSION, RpcErrorCode, VERSION } from '@shellink/protocol'
 import { connectDaemon, ensureDaemon, readLogTail, runForeground } from './daemon.js'
 import { runTui } from './tui.js'
 import { formatHelp } from './help.js'
@@ -11,13 +13,14 @@ import { createProgressReporter } from './progress.js'
 const locale = resolveCliLocale()
 // `version` is intentionally not boolean so `shellink upgrade --version TAG` works;
 // bare `--version` / `-V` still become true when no value follows.
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'no-newline', 'yes', 'check'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'no-newline', 'yes', 'check', 'detach'])
 
 type Flags = Record<string, string | boolean>
 
 class UsageError extends Error {}
 
-function parse(argv: string[]): { words: string[]; flags: Flags } {
+/** @internal exported for tests */
+export function parse(argv: string[]): { words: string[]; flags: Flags } {
   const words: string[] = []
   const flags: Flags = {}
   for (let index = 0; index < argv.length; index++) {
@@ -62,12 +65,38 @@ function numberFlag(value: unknown, fallback?: number): number | undefined {
   return parsed
 }
 
+/** CLI socket timeout = server timeout + 1s slack. Exported for tests. */
+export function socketTimeoutMs(serverTimeoutMs: number): number {
+  return serverTimeoutMs + 1000
+}
+
 function output(value: unknown, json: boolean): void {
   if (value === undefined) return
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) process.stdout.write(Buffer.from(value))
   else if (json) process.stdout.write(JSON.stringify(value) + '\n')
   else if (typeof value === 'string') process.stdout.write(value + (value.endsWith('\n') ? '' : '\n'))
   else process.stdout.write(JSON.stringify(value, null, 2) + '\n')
+}
+
+/**
+ * Wrap a long-running RPC promise with a heartbeat written to stderr every 2s.
+ * Keeps stdout clean (single JSON line) while giving hosts/users a "still progressing" signal.
+ * Polls session state concurrently to include `state=<STATE>` in the heartbeat.
+ */
+async function withHeartbeat<T>(client: import('./SocketClient.js').SocketClient, op: string, sessionId: string | undefined, p: Promise<T>, intervalMs = 2000): Promise<T> {
+  const start = Date.now()
+  let timer: NodeJS.Timeout | undefined
+  const tick = async (): Promise<void> => {
+    let state = ''
+    if (sessionId) {
+      try { const s = await client.request<{ state?: string }>('sessions.state', { id: sessionId }); state = s.state ?? '' } catch { /* session may be mid-op */ }
+    }
+    const elapsed = Math.round((Date.now() - start) / 1000)
+    process.stderr.write(`waiting ${op} ${elapsed}s${state ? ` state=${state}` : ''}\n`)
+  }
+  void tick()
+  timer = setInterval(() => { void tick() }, intervalMs)
+  try { return await p } finally { if (timer) clearInterval(timer) }
 }
 
 function printHelp(topic = 'root'): void {
@@ -155,23 +184,49 @@ async function handleRpc(words: string[], flags: Flags): Promise<void> {
     else if (action === 'state') output(await client.request('sessions.state', { id: required(id, 'session ID') }), json)
     else if (action === 'history') output(await client.request('sessions.history', { id: required(id, 'session ID'), since: numberFlag(flags.since, 0), limit: numberFlag(flags.limit, 2000) }), json)
     else if (action === 'input') output(await client.request('sessions.input', { id: required(id, 'session ID'), text: required(flags.text, '--text'), appendNewline: flags['no-newline'] !== true }), json)
-    else if (action === 'exec') output(await client.request('sessions.exec', { id: required(id, 'session ID'), command: required(flags.command, '--command'), timeoutMs: numberFlag(flags.timeout) }, numberFlag(flags.timeout, 30_000)! + 1000), json)
+    else if (action === 'exec') {
+      if (flags.detach === true) {
+        output(await client.request('sessions.execStart', { id: required(id, 'session ID'), command: required(flags.command, '--command'), timeoutMs: numberFlag(flags.timeout) }, socketTimeoutMs(numberFlag(flags.timeout, 20_000)!)), json)
+      } else {
+        const sid = required(id, 'session ID')
+        output(await withHeartbeat(client, 'exec', sid, client.request('sessions.exec', { id: sid, command: required(flags.command, '--command'), timeoutMs: numberFlag(flags.timeout) }, socketTimeoutMs(numberFlag(flags.timeout, 20_000)!))), json)
+      }
+    }
+    else if (action === 'exec-status') output(await client.request('sessions.execStatus', { jobId: required(id, 'job ID'), since: numberFlag(flags.since, 0), waitMs: numberFlag(flags.wait, 0) }, socketTimeoutMs(numberFlag(flags.wait, 0)!)), json)
+    else if (action === 'exec-cancel') output(await client.request('sessions.execCancel', { jobId: required(id, 'job ID') }), json)
     else if (action === 'mode') output(await client.request('sessions.mode', { id: required(id, 'session ID'), mode: required(flags.mode, '--mode') }), json)
     else if (action === 'close') output(await client.request('sessions.close', { id: required(id, 'session ID') }), json)
     else if (action === 'remove-record') output(await client.request('sessions.removeRecord', { id: required(id, 'session ID') }), json)
     else if (action === 'download') {
-      const result = await client.request<any>('sessions.download', { id: required(id, 'session ID'), path: required(flags.path, '--path'), timeoutMs: numberFlag(flags.timeout) }, numberFlag(flags.timeout, 120_000)! + 1000)
-      const target = required(flags.output, '--output')
-      fs.writeFileSync(target, Buffer.from(result.data))
-      output({ ...result, data: undefined, output: target }, json)
+      if (flags.detach === true) {
+        const target = path.resolve(required(flags.output, '--output'))
+        output(await client.request('sessions.downloadStart', { id: required(id, 'session ID'), path: required(flags.path, '--path'), output: target, timeoutMs: numberFlag(flags.timeout) }, socketTimeoutMs(numberFlag(flags.timeout, 120_000)!)), json)
+      } else {
+        const sid = required(id, 'session ID')
+        const result = await withHeartbeat(client, 'download', sid, client.request<any>('sessions.download', { id: sid, path: required(flags.path, '--path'), timeoutMs: numberFlag(flags.timeout) }, socketTimeoutMs(numberFlag(flags.timeout, 120_000)!)))
+        const target = required(flags.output, '--output')
+        fs.writeFileSync(target, Buffer.from(result.data))
+        output({ ...result, data: undefined, output: target }, json)
+      }
     } else if (action === 'upload') {
       const source = required(flags.input, '--input')
       const data = fs.readFileSync(source)
-      output(await client.request('sessions.upload', { id: required(id, 'session ID'), path: required(flags.path, '--path'), data, timeoutMs: numberFlag(flags.timeout), sha256: flags.sha256 }, numberFlag(flags.timeout, 120_000)! + 1000), json)
+      if (flags.detach === true) {
+        output(await client.request('sessions.uploadStart', { id: required(id, 'session ID'), path: required(flags.path, '--path'), data, timeoutMs: numberFlag(flags.timeout), sha256: flags.sha256 }, socketTimeoutMs(numberFlag(flags.timeout, 120_000)!)), json)
+      } else {
+        const sid = required(id, 'session ID')
+        output(await withHeartbeat(client, 'upload', sid, client.request('sessions.upload', { id: sid, path: required(flags.path, '--path'), data, timeoutMs: numberFlag(flags.timeout), sha256: flags.sha256 }, socketTimeoutMs(numberFlag(flags.timeout, 120_000)!))), json)
+      }
     } else if (action === 'edit') {
       const body = await readInput(flags.input)
-      output(await client.request('sessions.edit', { id: required(id, 'session ID'), ...body, timeoutMs: numberFlag(flags.timeout, body.timeoutMs) }), json)
-    } else throw new UsageError(`shellink session list|create|state|history|input|exec|download|upload|edit|mode|close|remove-record (${t(locale, 'usage')})`)
+      const editTimeoutMs = numberFlag(flags.timeout, body.timeoutMs) ?? 25_000
+      if (flags.detach === true) {
+        output(await client.request('sessions.editStart', { id: required(id, 'session ID'), path: required(body.path, 'path'), edits: body.edits, timeoutMs: numberFlag(flags.timeout, body.timeoutMs) }, socketTimeoutMs(editTimeoutMs)), json)
+      } else {
+        const sid = required(id, 'session ID')
+        output(await withHeartbeat(client, 'edit', sid, client.request('sessions.edit', { id: sid, ...body, timeoutMs: numberFlag(flags.timeout, body.timeoutMs) }, socketTimeoutMs(editTimeoutMs))), json)
+      }
+    } else throw new UsageError(`shellink session list|create|state|history|input|exec|exec-status|exec-cancel|download|upload|edit|mode|close|remove-record (${t(locale, 'usage')})`)
   } finally { client.close() }
 }
 
@@ -186,7 +241,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return
   }
   if (flags.version === true || group === 'version') {
-    output(flags.json === true ? { name: 'shellink', version: VERSION, protocolVersion: PROTOCOL_VERSION } : `Shellink ${VERSION}\nProtocol ${PROTOCOL_VERSION}`, flags.json === true)
+    output(
+      flags.json === true
+        ? { name: 'shellink', version: VERSION, commit: GIT_COMMIT, protocolVersion: PROTOCOL_VERSION }
+        : `Shellink ${VERSION} (${GIT_COMMIT})\nProtocol ${PROTOCOL_VERSION}`,
+      flags.json === true,
+    )
     return
   }
   if (group === 'help') { noExtraWords(words, 2); printHelp(action); return }
@@ -199,10 +259,24 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   await handleRpc(words, flags)
 }
 
-main().catch((error) => {
-  if (error instanceof UsageError) { console.error(error.message); process.exitCode = 2; return }
-  if (error instanceof UpgradeError) { console.error(error.message); process.exitCode = error.exitCode; return }
-  if (error instanceof AppError && error.status === 400) { console.error(error.message); process.exitCode = 2; return }
-  console.error(error instanceof Error ? error.message : error)
-  process.exitCode = 1
-})
+function isDirectRun(): boolean {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try { return import.meta.url === pathToFileURL(path.resolve(entry)).href }
+  catch { return false }
+}
+
+if (isDirectRun()) {
+  main().catch((error) => {
+    if (error instanceof UsageError) { console.error(error.message); process.exitCode = 2; return }
+    if (error instanceof UpgradeError) { console.error(error.message); process.exitCode = error.exitCode; return }
+    if (error instanceof AppError && error.status === 400) { console.error(error.message); process.exitCode = 2; return }
+    if (error instanceof AppError && error.code === RpcErrorCode.METHOD_NOT_FOUND) {
+      console.error(`${error.message}\nThis command requires a newer daemon. Run: shellink server restart`)
+      process.exitCode = 1
+      return
+    }
+    console.error(error instanceof Error ? error.message : error)
+    process.exitCode = 1
+  })
+}

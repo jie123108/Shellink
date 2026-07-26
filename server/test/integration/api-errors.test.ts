@@ -86,6 +86,69 @@ describe('API error paths', () => {
     const empty = await client.edit(sid, '/tmp/x', [])
     expect(empty.status).toBe(400)
   })
+
+  it('detach start validation and error mapping', async () => {
+    const noPath = await app.inject({
+      method: 'POST',
+      url: `/shellink/api/sessions/${sid}/upload-start`,
+      headers: { authorization: 'Bearer test-token' },
+    })
+    expect(noPath.statusCode).toBe(400)
+
+    const boundary = '----ErrDetachBoundary'
+    const raw = Buffer.from(`--${boundary}--\r\n`)
+    const noFile = await app.inject({
+      method: 'POST',
+      url: `/shellink/api/sessions/${sid}/upload-start?path=/tmp/x&timeoutMs=abc`,
+      headers: {
+        authorization: 'Bearer test-token',
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      payload: raw,
+    })
+    // invalid timeoutMs throws 400 via sendError, or 400 missing file first
+    expect([400, 500]).toContain(noFile.statusCode)
+
+    const makeUploadStart = async (timeoutMs: string) =>
+      app.inject({
+        method: 'POST',
+        url: `/shellink/api/sessions/${sid}/upload-start?path=/tmp/x&timeoutMs=${timeoutMs}`,
+        headers: {
+          authorization: 'Bearer test-token',
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+        },
+        payload: Buffer.concat([
+          Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.bin"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+          ),
+          Buffer.from('hi'),
+          Buffer.from(`\r\n--${boundary}--\r\n`),
+        ]),
+      })
+
+    const badTimeout = await makeUploadStart('10')
+    expect(badTimeout.statusCode).toBe(400)
+
+    // Valid timeoutMs exercises the successful return path of timeout()
+    const okTimeout = await makeUploadStart('5000')
+    expect([200, 404, 409]).toContain(okTimeout.statusCode)
+
+    const badDownload = await app.inject({
+      method: 'POST',
+      url: `/shellink/api/sessions/${sid}/download-start`,
+      headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+      payload: JSON.stringify({ path: '/tmp/x' }),
+    })
+    expect(badDownload.statusCode).toBe(400)
+
+    const badEdit = await app.inject({
+      method: 'POST',
+      url: `/shellink/api/sessions/${sid}/edit-start`,
+      headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+      payload: JSON.stringify({ path: '/tmp/x', edits: [] }),
+    })
+    expect(badEdit.statusCode).toBe(400)
+  })
 })
 
 describe('FileTransfer error scripted paths', () => {

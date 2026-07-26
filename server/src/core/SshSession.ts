@@ -76,6 +76,9 @@ export class SshSession extends BaseSession {
       passphrase: this.cfg.authType === 'key' ? this.cfg.passphrase : undefined,
       tryKeyboard: true,
       keepaliveInterval: 15_000,
+      // Slow transfers (rate-limited links, large base64 uploads) can delay
+      // keepalive round-trips for minutes; default countMax=3 drops at ~45s.
+      keepaliveCountMax: 40,
       readyTimeout: config.sshReadyTimeoutMs,
     })
   }

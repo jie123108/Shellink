@@ -64,13 +64,15 @@ const help = {
   state <session-id>                                查询会话状态
   history <session-id> [--since CURSOR] [--limit N] 读取会话历史
   input <session-id> --text TEXT [--no-newline]     写入文本
-  exec <session-id> --command COMMAND [--timeout MS] 执行命令
+  exec <session-id> --command COMMAND [--timeout MS] [--detach] 执行命令
+  exec-status <job-id> [--since CURSOR] [--wait MS]           查询 detach 作业状态（长轮询）
+  exec-cancel <job-id>                                        取消 detach 作业（发送 Ctrl+C）
   mode <session-id> --mode <AUTO|MANUAL>             设置输入模式
   close <session-id>                                 关闭会话
   remove-record <session-id>                         删除会话记录
-  download <session-id> --path REMOTE --output LOCAL [--timeout MS] 下载远端文件
-  upload <session-id> --input LOCAL --path REMOTE [--sha256 HASH] [--timeout MS] 上传本地文件
-  edit <session-id> --input <FILE|-> [--timeout MS]  编辑远端文件`,
+  download <session-id> --path REMOTE --output LOCAL [--timeout MS] [--detach] 下载远端文件
+  upload <session-id> --input LOCAL --path REMOTE [--sha256 HASH] [--timeout MS] [--detach] 上传本地文件
+  edit <session-id> --input <FILE|-> [--timeout MS] [--detach]  编辑远端文件`,
     webhook: `用法: shellink webhook <命令> [选项]
 
 命令:
@@ -147,13 +149,15 @@ Commands:
   state <session-id>                                Show session state
   history <session-id> [--since CURSOR] [--limit N] Read session history
   input <session-id> --text TEXT [--no-newline]     Write text
-  exec <session-id> --command COMMAND [--timeout MS] Run a command
+  exec <session-id> --command COMMAND [--timeout MS] [--detach] Run a command
+  exec-status <job-id> [--since CURSOR] [--wait MS]          Poll a detached exec job
+  exec-cancel <job-id>                                       Cancel a detached exec job (sends Ctrl+C)
   mode <session-id> --mode <AUTO|MANUAL>             Set input mode
   close <session-id>                                 Close a session
   remove-record <session-id>                         Delete a session record
-  download <session-id> --path REMOTE --output LOCAL [--timeout MS] Download a remote file
-  upload <session-id> --input LOCAL --path REMOTE [--sha256 HASH] [--timeout MS] Upload a local file
-  edit <session-id> --input <FILE|-> [--timeout MS]  Edit a remote file`,
+  download <session-id> --path REMOTE --output LOCAL [--timeout MS] [--detach] Download a remote file
+  upload <session-id> --input LOCAL --path REMOTE [--sha256 HASH] [--timeout MS] [--detach] Upload a local file
+  edit <session-id> --input <FILE|-> [--timeout MS] [--detach]  Edit a remote file`,
     webhook: `Usage: shellink webhook <command> [options]
 
 Commands:
