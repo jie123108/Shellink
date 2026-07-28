@@ -66,7 +66,8 @@ describe('LocalPtySession', () => {
       })
       s.connect()
       await sleep(600)
-      expect(s.recentOutput()).toContain('tty-ok-24 80')
+      // Bun ExpectPty forces wide cols so long lines are not wrap-truncated
+      expect(s.recentOutput()).toContain('tty-ok-24 2000')
       expect(s.recentOutput()).not.toContain('no-tty')
       s.resize(100, 30)
       s.write('stty size\n')

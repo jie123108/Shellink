@@ -24,6 +24,15 @@ The GitHub Release body is generated from the matching section in this file
 
 ### Removed
 
+## [0.2.1] - 2026-07-28
+
+### Fixed
+
+- Fix file upload/edit hangs when bash PS2 (`>`) was mistaken for the shell prompt; uploads/edits now write encoded payloads via `printf` appends (no heredocs) and arm `waitForStable` before the decode/verify command. Also stop mapping "remote file size" verify errors to HTTP 413.
+- Fix Bun-compiled uploads failing on narrow (80-col) PTYs where long `printf`/probe lines were wrap-corrupted: widen via remote `stty cols`, keep `printf` chunks short, and probe codecs with multi-line commands.
+- Fix large Bun uploads that lost data or raced `waitForStable` during the printf storm: pace writes with sync markers, drain before finalize, wait for `SP_UP` in history (not intermediate prompts), and settle to `WAITING_INPUT` before releasing the transfer lock.
+- Widen Bun-compiled command/expect PTYs to 2000 cols by default so long `exec` commands and transfers are not wrap-truncated on narrow terminals.
+
 ## [0.2.0] - 2026-07-26
 
 ### Added

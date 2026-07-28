@@ -70,6 +70,21 @@ describe('sessions transfer and edit', () => {
     sid = ''
   }, 90_000)
 
+  it('uploads through an 80-column PTY with LocalPty-style no-op resize', async () => {
+    const remotePath = `/tmp/sp-pty80-${crypto.randomBytes(3).toString('hex')}.txt`
+    // payload > 4KB so encoded stream spans multiple writes and would wrap on a narrow PTY
+    const payload = Buffer.alloc(6_000, 'a')
+    const sha = crypto.createHash('sha256').update(payload).digest('hex')
+
+    const up = await client.upload(sid, remotePath, payload, { sha256: sha })
+    expect(up.status).toBe(200)
+    expect((up.json as { ok: boolean }).ok).toBe(true)
+
+    const cat = await client.exec(sid, `wc -c < ${remotePath} | tr -d ' '`)
+    expect((cat.json as { output: string }).output).toContain(String(payload.length))
+    await client.exec(sid, `rm -f ${remotePath}`)
+  }, 90_000)
+
   it('rejects transfer when MANUAL', async () => {
     await client.setMode(sid, 'MANUAL')
     const down = await client.download(sid, '/tmp/x')

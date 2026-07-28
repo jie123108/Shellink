@@ -17,6 +17,38 @@ function scriptWaitForStable(s: MockSession, steps: Step[]): void {
   }
 }
 
+/** Feed SP_DRAIN / SP_S_ / SP_WROTE markers that writeRemoteBase64File polls from history. */
+function scriptWriteMarkers(s: MockSession, opts: { hangWrite?: boolean } = {}): void {
+  const orig = s.write.bind(s)
+  s.write = (chunk: string, writeOpts?) => {
+    orig(chunk, writeOpts)
+    if (opts.hangWrite) {
+      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_') || chunk.includes('SP_WROTE_')) {
+        return
+      }
+    }
+    if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+      const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+      if (m) {
+        queueMicrotask(() => {
+          s.feed(`${m}\n$ `)
+          s.forceState('WAITING_INPUT')
+        })
+      }
+      return
+    }
+    if (chunk.includes('SP_WROTE_')) {
+      const m = chunk.match(/SP_WROTE_[a-f0-9]+/)?.[0]
+      if (m) {
+        queueMicrotask(() => {
+          s.feed(`${m}\n$ `)
+          s.forceState('WAITING_INPUT')
+        })
+      }
+    }
+  }
+}
+
 function makeRemoteEdit(sessionId: string): { re: RemoteEdit; s: MockSession; dispose: () => void } {
   const stored: Array<{ seq: number; plain: string }> = []
   const onData = (e: { sessionId: string; seq: number; direction: string; plain: string }) => {
@@ -35,7 +67,7 @@ function makeRemoteEdit(sessionId: string): { re: RemoteEdit; s: MockSession; di
     },
   }
   const re = new RemoteEdit(historySource, new SessionOpLock())
-  const s = new MockSession({ id: sessionId})
+  const s = new MockSession({ id: sessionId })
   s.forceState('WAITING_INPUT')
   s.resize = () => {}
   return { re, s, dispose: () => bus.off('session.data', onData) }
@@ -44,15 +76,16 @@ function makeRemoteEdit(sessionId: string): { re: RemoteEdit; s: MockSession; di
 describe('RemoteEdit python path coverage', () => {
   it('runs python3 edit via waitForStable scripting', async () => {
     const { re, s, dispose } = makeRemoteEdit('re-py3')
+    scriptWriteMarkers(s)
 
     // Order of waitForStable calls in runPythonEdit:
-    // 1 probeEngine, 2 stty -echo, 3 probeDecoder, 4 write script, 5 write payload, 6 run python
+    // 1 probeEngine, 2 widenPty stty, 3 stty -echo, 4 probeDecoder, 5 run python
+    // (write script/payload now poll history markers, not waitForStable)
     const replies = [
       'SP_EDIT_ENGINE:python3\n$ ',
       '$ ',
+      '$ ',
       'SP_DEC:base64\n$ ',
-      '$ ',
-      '$ ',
       'SP_EDIT:ok:1\n$ ',
     ]
     let step = 0
@@ -75,15 +108,15 @@ describe('RemoteEdit python path coverage', () => {
 
   it('reports a timeout when the python edit command itself never stabilizes', async () => {
     const { re, s, dispose } = makeRemoteEdit('re-py-timeout')
+    scriptWriteMarkers(s)
 
-    // Steps: 1 probeEngine, 2 stty -echo, 3 probeDecoder, 4 write script,
-    // 5 write payload, 6 run python (times out), 7 cleanup stty echo.
+    // Steps: 1 probeEngine, 2 widenPty, 3 stty -echo, 4 probeDecoder,
+    // 5 run python (times out), 6 cleanup stty echo.
     scriptWaitForStable(s, [
       { text: 'SP_EDIT_ENGINE:python3\n$ ' },
       { text: '$ ' },
+      { text: '$ ' },
       { text: 'SP_DEC:base64\n$ ' },
-      { text: '$ ' },
-      { text: '$ ' },
       { timeout: true },
       { text: '$ ' },
     ])
@@ -99,19 +132,20 @@ describe('RemoteEdit python path coverage', () => {
 
   it('reports a timeout when writing the remote temp file never stabilizes', async () => {
     const { re, s, dispose } = makeRemoteEdit('re-py-writetimeout')
+    scriptWriteMarkers(s, { hangWrite: true })
 
-    // Steps: 1 probeEngine, 2 stty -echo, 3 probeDecoder,
-    // 4 write script file (times out), 5 outer-catch cleanup.
+    // Steps: 1 probeEngine, 2 widenPty, 3 stty -echo, 4 probeDecoder,
+    // then write script file polls markers and times out; outer-catch cleanup.
     scriptWaitForStable(s, [
       { text: 'SP_EDIT_ENGINE:python3\n$ ' },
       { text: '$ ' },
+      { text: '$ ' },
       { text: 'SP_DEC:base64\n$ ' },
-      { timeout: true },
       { text: '$ ' },
     ])
 
     try {
-      await expect(re.edit(s, '/tmp/x.txt', [{ oldText: 'a', newText: 'b' }], 10_000)).rejects.toMatchObject({
+      await expect(re.edit(s, '/tmp/x.txt', [{ oldText: 'a', newText: 'b' }], 400)).rejects.toMatchObject({
         message: 'Timed out writing the remote temporary file',
       })
     } finally {

@@ -221,12 +221,17 @@ export class RemoteEdit {
   }
 
   /** 加宽 PTY，避免长命令被终端折行插入空格破坏路径/参数 */
-  private widenPty(session: BaseSession): void {
+  private async widenPty(session: BaseSession, timeoutMs: number): Promise<void> {
     try {
-      session.resize(200, 50)
+      session.resize(10_000, 50)
     } catch {
       // ignore
     }
+    await this.execCapture(
+      session,
+      'stty cols 10000 rows 50 2>/dev/null || stty cols 2000 rows 50 2>/dev/null || true',
+      Math.min(timeoutMs, 10_000),
+    ).catch(() => {})
   }
 
   private async execCapture(
@@ -314,29 +319,78 @@ export class RemoteEdit {
     decoder: 'openssl' | 'base64',
   ): Promise<void> {
     const token = crypto.randomBytes(4).toString('hex')
-    const eof = `E${token}`
     const out = shellQuote(remotePath)
+    const b64Name = `/tmp/e${token}`
+    const quotedB64 = shellQuote(b64Name)
     const b64 = data.toString('base64')
-    const startSeq = session.lastSeq
+    const marker = `SP_WROTE_${token}`
 
-    // 短命令，与 upload 一致；勿用 (a||b) 管道以免 stdin 被吃掉
-    const decodeCmd =
-      decoder === 'openssl'
-        ? `openssl base64 -d -A -out ${out} <<'${eof}'`
-        : `base64 -d > ${out} <<'${eof}'`
-
-    session.write(`${decodeCmd}\n`)
-    const chunkSize = 12 * 1024
+    // Keep full printf line under 80 cols: Bun ExpectPty may not resize.
+    // Sync periodically so PTY/SSH buffers do not drop printf lines.
+    const chunkSize = 32
+    const syncEvery = 64
+    session.write(`: > ${quotedB64}\n`)
+    let chunksSinceSync = 0
     for (let i = 0; i < b64.length; i += chunkSize) {
-      session.write(b64.slice(i, i + chunkSize))
-      if (i + chunkSize < b64.length) await sleep(5)
+      const chunk = b64.slice(i, i + chunkSize)
+      session.write(`printf '%s' '${chunk}' >> ${quotedB64}\n`)
+      chunksSinceSync += 1
+      const isLast = i + chunkSize >= b64.length
+      if (!isLast && chunksSinceSync >= syncEvery) {
+        const sync = `SP_S_${token}_${i}`
+        const syncSeq = session.lastSeq
+        session.write(`echo ${sync}\n`)
+        const deadline = Date.now() + timeoutMs
+        for (;;) {
+          const { text } = this.historySource.history(session.id, syncSeq, 50_000)
+          if (text.includes(sync)) break
+          if (Date.now() >= deadline || session.state === 'DISCONNECTED') {
+            throw new TransferError('Timed out writing the remote temporary file', 504)
+          }
+          await sleep(40)
+        }
+        chunksSinceSync = 0
+      } else if (!isLast) {
+        await sleep(1)
+      }
     }
-    session.write(`\n${eof}\n`)
 
-    const { timedOut } = await session.waitForStable(timeoutMs)
-    void this.historySource.history(session.id, startSeq, 50_000)
-    if (timedOut) {
-      throw new TransferError('Timed out writing the remote temporary file', 504)
+    const decode =
+      decoder === 'openssl'
+        ? `openssl base64 -d -A -in ${quotedB64} -out ${out}`
+        : `base64 -d < ${quotedB64} > ${out}`
+
+    const drain = `SP_DRAIN_${token}`
+    let startSeq = session.lastSeq
+    session.write(`echo ${drain}\n`)
+    const drainDeadline = Date.now() + timeoutMs
+    for (;;) {
+      const { text } = this.historySource.history(session.id, startSeq, 50_000)
+      if (text.includes(drain)) break
+      if (Date.now() >= drainDeadline || session.state === 'DISCONNECTED') {
+        throw new TransferError('Timed out writing the remote temporary file', 504)
+      }
+      await sleep(40)
+    }
+
+    startSeq = session.lastSeq
+    session.write(`${decode}; rm -f ${quotedB64}; echo ${marker}\n`)
+    const writeDeadline = Date.now() + timeoutMs
+    for (;;) {
+      const { text } = this.historySource.history(session.id, startSeq, 50_000)
+      if (text.includes(marker)) break
+      if (Date.now() >= writeDeadline || session.state === 'DISCONNECTED') {
+        throw new TransferError('Timed out writing the remote temporary file', 504)
+      }
+      await sleep(40)
+    }
+    {
+      const settleDeadline = Date.now() + 5_000
+      while (Date.now() < settleDeadline) {
+        const state = session.state
+        if (state === 'WAITING_INPUT' || state === 'DISCONNECTED') break
+        await sleep(40)
+      }
     }
   }
 
@@ -357,7 +411,7 @@ export class RemoteEdit {
     const scriptPath = `/tmp/spe${id}.py`
     const payloadPath = `/tmp/spe${id}.json`
 
-    this.widenPty(session)
+    await this.widenPty(session, timeoutMs)
     await this.execCapture(session, 'stty -echo 2>/dev/null || true', 10_000)
     this.assertReady(session)
 

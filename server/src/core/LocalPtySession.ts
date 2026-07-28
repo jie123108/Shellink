@@ -13,12 +13,20 @@ interface PtyLike {
   onExit(listener: (event: { exitCode: number | null }) => void): void
 }
 
+/**
+ * Bun-compiled binary has no node-pty ioctl resize; ExpectPty/PipeProcess rely on
+ * COLUMNS + stty. Keep the local PTY wide by default so long shell lines (upload
+ * printf, exec commands) are not wrap-truncated or lost on narrow PTYs.
+ */
+const BUN_PTY_DEFAULT_COLS = 2000
+
 class PipeProcess implements PtyLike {
   private readonly child: ChildProcessWithoutNullStreams
 
   constructor(command: string, config: { term: string; cols: number; rows: number }) {
+    const cols = Math.max(config.cols, BUN_PTY_DEFAULT_COLS)
     this.child = spawnProcess('/bin/sh', ['-lc', command], {
-      env: { ...process.env, TERM: config.term, COLUMNS: String(config.cols), LINES: String(config.rows) },
+      env: { ...process.env, TERM: config.term, COLUMNS: String(cols), LINES: String(config.rows) },
       cwd: os.homedir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -46,6 +54,7 @@ class ExpectPty implements PtyLike {
   private exited = false
 
   constructor(command: string, config: { term: string; cols: number; rows: number }) {
+    const cols = Math.max(config.cols, BUN_PTY_DEFAULT_COLS)
     this.controlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shellink-expect-'))
     this.slavePathFile = path.join(this.controlDir, 'slave-path')
     const script = [
@@ -67,12 +76,15 @@ class ExpectPty implements PtyLike {
         SHELLINK_COMMAND: command,
         SHELLINK_SLAVE_FILE: this.slavePathFile,
         TERM: config.term,
-        COLUMNS: String(config.cols),
+        COLUMNS: String(cols),
         LINES: String(config.rows),
       },
       cwd: os.homedir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
+    // Ensure the expect slave wins even if spawn raced the stty line.
+    this.desiredSize = { cols, rows: config.rows }
+    this.applyResizeOrRetry()
   }
 
   write(data: string): void { this.child.stdin.write(data) }

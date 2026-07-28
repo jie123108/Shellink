@@ -29,7 +29,8 @@ export interface TransferHistorySource {
 interface CodecSpec {
   name: TransferCodec
   encodeCmd: (quotedPath: string, rawPath: string) => string
-  decodeCmd: (quotedTmp: string, rawTmp: string, eofMarker: string) => string
+  /** Decode encoded file at `rawSrc` into destination `rawTmp`. No heredoc/PS2. */
+  decodeFileCmd: (quotedSrc: string, quotedTmp: string, rawSrc: string, rawTmp: string) => string
   encodeLocal: (buf: Buffer) => string
   decodeLocal: (text: string) => Buffer
 }
@@ -38,14 +39,14 @@ const CODECS: CodecSpec[] = [
   {
     name: 'base64',
     encodeCmd: (p) => `base64 < ${p}`,
-    decodeCmd: (tmp, _raw, eof) => `base64 -d > ${tmp} <<'${eof}'`,
+    decodeFileCmd: (src, tmp) => `base64 -d < ${src} > ${tmp}`,
     encodeLocal: (buf) => buf.toString('base64'),
     decodeLocal: (text) => Buffer.from(text.replace(/\s+/g, ''), 'base64'),
   },
   {
     name: 'openssl',
     encodeCmd: (p) => `openssl base64 -A -in ${p}`,
-    decodeCmd: (tmp, _raw, eof) => `openssl base64 -d -A -out ${tmp} <<'${eof}'`,
+    decodeFileCmd: (src, tmp) => `openssl base64 -d -A -in ${src} -out ${tmp}`,
     encodeLocal: (buf) => buf.toString('base64'),
     decodeLocal: (text) => Buffer.from(text.replace(/\s+/g, ''), 'base64'),
   },
@@ -53,15 +54,15 @@ const CODECS: CodecSpec[] = [
     name: 'python3',
     encodeCmd: (_q, raw) =>
       `python3 -c ${shellQuote(`import sys,base64; sys.stdout.buffer.write(base64.standard_b64encode(open(${JSON.stringify(raw)},"rb").read()))`)}`,
-    decodeCmd: (_q, rawTmp, eof) =>
-      `python3 -c ${shellQuote(`import sys,base64; open(${JSON.stringify(rawTmp)},"wb").write(base64.standard_b64decode(sys.stdin.buffer.read()))`)} <<'${eof}'`,
+    decodeFileCmd: (_qs, _qt, rawSrc, rawTmp) =>
+      `python3 -c ${shellQuote(`import base64; open(${JSON.stringify(rawTmp)},"wb").write(base64.standard_b64decode(open(${JSON.stringify(rawSrc)},"rb").read()))`)}`,
     encodeLocal: (buf) => buf.toString('base64'),
     decodeLocal: (text) => Buffer.from(text.replace(/\s+/g, ''), 'base64'),
   },
   {
     name: 'xxd',
     encodeCmd: (p) => `xxd -p ${p}`,
-    decodeCmd: (tmp, _raw, eof) => `xxd -r -p > ${tmp} <<'${eof}'`,
+    decodeFileCmd: (src, tmp) => `xxd -r -p < ${src} > ${tmp}`,
     encodeLocal: (buf) => buf.toString('hex'),
     decodeLocal: (text) => Buffer.from(text.replace(/\s+/g, ''), 'hex'),
   },
@@ -86,10 +87,6 @@ function sha256Hex(buf: Buffer): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /**
@@ -171,6 +168,20 @@ export class FileTransfer {
     }
   }
 
+  /** Widen local + remote PTY so long printf lines are not wrap-corrupted (spaces inserted). */
+  private async widenPty(session: BaseSession, timeoutMs: number): Promise<void> {
+    try {
+      session.resize(10_000, 50)
+    } catch {
+      // ignore
+    }
+    await this.execCapture(
+      session,
+      'stty cols 10000 rows 50 2>/dev/null || stty cols 2000 rows 50 2>/dev/null || true',
+      Math.min(timeoutMs, 10_000),
+    ).catch(() => {})
+  }
+
   private async execCapture(
     session: BaseSession,
     command: string,
@@ -183,6 +194,39 @@ export class FileTransfer {
     return { output: text, timedOut, state }
   }
 
+  /**
+   * Wait until `history(since=startSeq)` contains `marker`. Unlike waitForStable,
+   * this ignores intermediate WAITING_INPUT from a printf storm (or `>>` echo
+   * matching the prompt regex).
+   */
+  private async waitForOutputMarker(
+    session: BaseSession,
+    startSeq: number,
+    marker: string | RegExp,
+    timeoutMs: number,
+  ): Promise<{ text: string; timedOut: boolean }> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const { text } = this.historySource.history(session.id, startSeq, 50_000)
+      const found = typeof marker === 'string' ? text.includes(marker) : marker.test(text)
+      if (found) return { text, timedOut: false }
+      if (Date.now() >= deadline || session.state === 'DISCONNECTED') {
+        return { text, timedOut: true }
+      }
+      await sleep(40)
+    }
+  }
+
+  /** Poll until WAITING_INPUT so the next op does not hit a transient 409. */
+  private async settleWaitingInput(session: BaseSession, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const state = session.state
+      if (state === 'WAITING_INPUT' || state === 'DISCONNECTED') return
+      await sleep(40)
+    }
+  }
+
   private async probeCodec(session: BaseSession, timeoutMs: number): Promise<CodecSpec> {
     const cached = this.codecCache.get(session.id)
     if (cached) return cached
@@ -190,12 +234,18 @@ export class FileTransfer {
     const probe = await this.execCapture(
       session,
       [
-        'if command -v base64 >/dev/null 2>&1; then echo SP_CODEC:base64',
-        'elif command -v openssl >/dev/null 2>&1; then echo SP_CODEC:openssl',
-        'elif command -v python3 >/dev/null 2>&1; then echo SP_CODEC:python3',
-        'elif command -v xxd >/dev/null 2>&1; then echo SP_CODEC:xxd',
-        'else echo SP_CODEC:none; fi',
-      ].join('; '),
+        'if command -v base64 >/dev/null 2>&1; then',
+        '  echo SP_CODEC:base64',
+        'elif command -v openssl >/dev/null 2>&1; then',
+        '  echo SP_CODEC:openssl',
+        'elif command -v python3 >/dev/null 2>&1; then',
+        '  echo SP_CODEC:python3',
+        'elif command -v xxd >/dev/null 2>&1; then',
+        '  echo SP_CODEC:xxd',
+        'else',
+        '  echo SP_CODEC:none',
+        'fi',
+      ].join('\n'),
       Math.min(timeoutMs, 30_000),
     )
     if (probe.timedOut) {
@@ -314,56 +364,106 @@ export class FileTransfer {
 
     return this.opLock.withLock(session.id, async () => {
       const startAt = Date.now()
+      // Widen before any long probe/transfer command — Bun LocalPty cannot ioctl-resize,
+      // and jump-host shells often stay at 80 columns.
+      await this.widenPty(session, timeoutMs)
+      this.assertReady(session)
+
       const codec = await this.probeCodec(session, timeoutMs)
       this.assertReady(session)
 
-      const token = crypto.randomUUID().replace(/-/g, '')
-      const eof = `SPEOF_${token}`
+      const token = crypto.randomUUID().replace(/-/g, '').slice(0, 8)
       const quotedDest = shellQuote(pathClean)
-      const tmpName = `/tmp/.shellink-xfer-${token}`
+      const tmpName = `/tmp/x${token}`
       const quotedTmp = shellQuote(tmpName)
+      const b64Name = `/tmp/b${token}`
+      const quotedB64 = shellQuote(b64Name)
       const encoded = codec.encodeLocal(data)
 
-      await this.execCapture(session, 'stty -echo 2>/dev/null || true', 10_000)
-      this.assertReady(session)
+      // Stream base64 to a temp file via short printf lines. Each line is a
+      // complete shell command. Keep the FULL line under 80 columns: Bun's
+      // ExpectPty may stay at 80 cols even after remote `stty` widen (local
+      // wrap inserts a real newline mid-quote → bash PS2, silent failure).
+      // overhead ≈ printf '%s' '…' >> '/tmp/bXXXXXXXX' → ~34 chars → chunk ≤ 40.
+      // Sync every N chunks so the local PTY/SSH window cannot overflow and
+      // silently drop later printf lines (~32KB loss without pacing).
+      const chunkSize = 32
+      const syncEvery = 64
+      session.write(`: > ${quotedB64}\n`)
+      let chunksSinceSync = 0
+      for (let i = 0; i < encoded.length; i += chunkSize) {
+        const chunk = encoded.slice(i, i + chunkSize)
+        session.write(`printf '%s' '${chunk}' >> ${quotedB64}\n`)
+        chunksSinceSync += 1
+        const isLast = i + chunkSize >= encoded.length
+        if (!isLast && chunksSinceSync >= syncEvery) {
+          const sync = `SP_S_${token}_${i}`
+          const syncSeq = session.lastSeq
+          session.write(`echo ${sync}\n`)
+          const syncTimeout = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
+          const synced = await this.waitForOutputMarker(session, syncSeq, sync, syncTimeout)
+          if (synced.timedOut) {
+            await this.execCapture(
+              session,
+              `rm -f ${quotedB64} 2>/dev/null || true`,
+              10_000,
+            ).catch(() => {})
+            throw new TransferError('Upload decoding timed out', 504)
+          }
+          chunksSinceSync = 0
+        } else if (!isLast) {
+          await sleep(1)
+        }
+      }
 
       const remaining = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
-      const startSeq = session.lastSeq
-
-      session.write(`${codec.decodeCmd(quotedTmp, tmpName, eof)}\n`)
-
-      const chunkSize = 12 * 1024
-      for (let i = 0; i < encoded.length; i += chunkSize) {
-        session.write(encoded.slice(i, i + chunkSize))
-        if (i + chunkSize < encoded.length) await sleep(5)
+      // Drain the printf queue before finalize. waitForStable would resolve on
+      // intermediate prompts between printfs while finalize is still buffered.
+      const drain = `SP_DRAIN_${token}`
+      let startSeq = session.lastSeq
+      session.write(`echo ${drain}\n`)
+      {
+        const drainWait = await this.waitForOutputMarker(session, startSeq, drain, remaining)
+        if (drainWait.timedOut) {
+          await this.execCapture(
+            session,
+            `rm -f ${quotedB64} 2>/dev/null || true`,
+            10_000,
+          ).catch(() => {})
+          throw new TransferError('Upload decoding timed out', 504)
+        }
       }
-      session.write(`\n${eof}\n`)
 
-      // Heredoc decode is silent until the prompt returns; do not treat IDLE as done
-      // or a slow link will "finish" while bytes are still in flight.
-      const { timedOut } = await session.waitForStable(remaining, { acceptIdle: false })
-      void this.historySource.history(session.id, startSeq, 50_000)
+      const decode = codec.decodeFileCmd(quotedB64, quotedTmp, b64Name, tmpName)
+      const finalizeCmd = [
+        `${decode}`,
+        `rm -f ${quotedB64}`,
+        `mv -f ${quotedTmp} ${quotedDest} 2>/dev/null || { cp ${quotedTmp} ${quotedDest} && rm -f ${quotedTmp}; }`,
+        `echo SP_UP:$(wc -c < ${quotedDest} | tr -d ' ')`,
+      ].join('; ')
+      startSeq = session.lastSeq
+      session.write(`${finalizeCmd}\n`)
+      const verifyTimeoutMs = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
+      const { text: verifyOutput, timedOut } = await this.waitForOutputMarker(
+        session,
+        startSeq,
+        /SP_UP:\d+/,
+        verifyTimeoutMs,
+      )
       if (timedOut) {
         await this.execCapture(
           session,
-          `rm -f ${quotedTmp} 2>/dev/null; stty echo 2>/dev/null || true`,
+          `rm -f ${quotedB64} ${quotedTmp} 2>/dev/null || true`,
           10_000,
         ).catch(() => {})
         throw new TransferError('Upload decoding timed out', 504)
       }
 
-      const verifyTimeoutMs = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
-      const verify = await this.execCapture(
-        session,
-        [
-          `mv -f ${quotedTmp} ${quotedDest} 2>/dev/null || { cp ${quotedTmp} ${quotedDest} && rm -f ${quotedTmp}; }`,
-          `echo SP_UP:$(wc -c < ${quotedDest} | tr -d ' ')`,
-          'stty echo 2>/dev/null || true',
-        ].join('; '),
-        verifyTimeoutMs,
-      )
-      if (verify.timedOut) throw new TransferError('Upload verification timed out', 504)
-      const vm = lastLineMarker(verify.output, /SP_UP:(\d+)/)
+      // Marker can appear while still OUTPUTTING; wait for the prompt so the
+      // next transfer/exec does not see a transient non-WAITING_INPUT 409.
+      await this.settleWaitingInput(session, 5_000)
+
+      const vm = lastLineMarker(verifyOutput, /SP_UP:(\d+)/)
       if (!vm) throw new TransferError('Unable to verify the remote file size after upload', 502)
       const remoteSize = Number(vm[1])
       if (remoteSize !== data.length) {

@@ -26,46 +26,29 @@ describe('FileTransfer upload scripted', () => {
         },
       }
       const ft = new FileTransfer(historySource, new SessionOpLock())
-      const s = new MockSession({ id: sessionId})
+      const s = new MockSession({ id: sessionId })
       s.forceState('WAITING_INPUT')
+      s.resize = () => {}
 
       const data = Buffer.from('hi')
-      // Drive the exchange purely by write() call order so codec-specific
-      // command text (base64/openssl/python3/xxd) never needs to be matched.
-      type Phase = 'probe' | 'stty' | 'decode' | 'chunk' | 'eof' | 'verify' | 'done'
-      let phase: Phase = 'probe'
-      const respond = (text: string) => {
-        queueMicrotask(() => s.feed(text))
-      }
-
       const origWrite = s.write.bind(s)
       s.write = (chunk: string, opts?) => {
         origWrite(chunk, opts)
-        switch (phase) {
-          case 'probe':
-            phase = 'stty'
-            respond(`SP_CODEC:${codecName}\n$ `)
-            return
-          case 'stty':
-            phase = 'decode'
-            respond('$ ')
-            return
-          case 'decode':
-            phase = 'chunk'
-            return
-          case 'chunk':
-            phase = 'eof'
-            return
-          case 'eof':
-            phase = 'verify'
-            respond('$ ')
-            return
-          case 'verify':
-            phase = 'done'
-            respond(`SP_UP:${data.length}\n$ `)
-            return
-          case 'done':
-            return
+        if (chunk.includes('SP_CODEC') || chunk.includes('command -v base64')) {
+          queueMicrotask(() => s.feed(`SP_CODEC:${codecName}\n$ `))
+          return
+        }
+        if (chunk.includes('stty cols')) {
+          queueMicrotask(() => s.feed('$ '))
+          return
+        }
+        if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+          const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+          queueMicrotask(() => s.feed(`${m}\n$ `))
+          return
+        }
+        if (chunk.includes('SP_UP')) {
+          queueMicrotask(() => { s.feed(`SP_UP:${data.length}\n$ `); s.forceState('WAITING_INPUT') })
         }
       }
 

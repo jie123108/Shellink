@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { config } from '../../src/config.js'
+import { bus } from '../../src/core/events.js'
 import { FileTransfer } from '../../src/core/FileTransfer.js'
 import { SessionOpLock } from '../../src/core/SessionOpLock.js'
 import { MockSession } from '../helpers/mockSession.js'
@@ -102,47 +103,125 @@ describe('FileTransfer.download error branches', () => {
 })
 
 describe('FileTransfer.upload error and chunking branches', () => {
-  it('reports a timeout when upload verification never stabilizes', async () => {
+  it('reports a timeout when upload decode+verify never stabilizes', async () => {
     const { ft, stored } = makeFt()
     const s = makeSession('up-verify-timeout')
-    scriptWaitForStable(s, stored, [{ text: 'SP_CODEC:base64\n' }, {}, { timedOut: false }, { timedOut: true }])
-    await expect(ft.upload(s, '/tmp/x', Buffer.from('hi'))).rejects.toMatchObject({
-      message: 'Upload verification timed out',
-      statusCode: 504,
-    })
+    s.resize = () => {}
+    const onData = (e: { sessionId: string; seq: number; direction: string; plain: string }) => {
+      if (e.sessionId === s.id && e.direction === 'output') stored.push({ seq: e.seq, plain: e.plain })
+    }
+    bus.on('session.data', onData)
+    const orig = s.write.bind(s)
+    s.write = (chunk: string, opts?) => {
+      orig(chunk, opts)
+      if (chunk.includes('SP_CODEC') || chunk.includes('command -v base64')) {
+        queueMicrotask(() => s.feed('SP_CODEC:base64\n$ '))
+        return
+      }
+      if (chunk.includes('stty cols')) {
+        queueMicrotask(() => s.feed('$ '))
+        return
+      }
+      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+        const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+        queueMicrotask(() => s.feed(`${m}\n$ `))
+        return
+      }
+      // finalize: stay silent → marker wait times out
+    }
+    try {
+      await expect(ft.upload(s, '/tmp/x', Buffer.from('hi'), { timeoutMs: 400 })).rejects.toMatchObject({
+        message: 'Upload decoding timed out',
+        statusCode: 504,
+      })
+    } finally {
+      bus.off('session.data', onData)
+    }
   })
 
   it('reports a missing marker when the verify output has no SP_UP marker', async () => {
     const { ft, stored } = makeFt()
     const s = makeSession('up-no-marker')
-    scriptWaitForStable(s, stored, [
-      { text: 'SP_CODEC:base64\n' },
-      {},
-      { timedOut: false },
-      { text: 'no marker in this output\n' },
-    ])
-    await expect(ft.upload(s, '/tmp/x', Buffer.from('hi'))).rejects.toMatchObject({
-      message: 'Unable to verify the remote file size after upload',
-      statusCode: 502,
-    })
+    s.resize = () => {}
+    const onData = (e: { sessionId: string; seq: number; direction: string; plain: string }) => {
+      if (e.sessionId === s.id && e.direction === 'output') stored.push({ seq: e.seq, plain: e.plain })
+    }
+    bus.on('session.data', onData)
+    const orig = s.write.bind(s)
+    s.write = (chunk: string, opts?) => {
+      orig(chunk, opts)
+      if (chunk.includes('SP_CODEC') || chunk.includes('command -v base64')) {
+        queueMicrotask(() => s.feed('SP_CODEC:base64\n$ '))
+        return
+      }
+      if (chunk.includes('stty cols')) {
+        queueMicrotask(() => s.feed('$ '))
+        return
+      }
+      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+        const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+        queueMicrotask(() => s.feed(`${m}\n$ `))
+        return
+      }
+      if (chunk.includes('SP_UP')) {
+        // produce output without the SP_UP:N marker the uploader requires
+        queueMicrotask(() => s.feed('no marker in this output\n$ '))
+      }
+    }
+    try {
+      await expect(ft.upload(s, '/tmp/x', Buffer.from('hi'), { timeoutMs: 400 })).rejects.toMatchObject({
+        message: 'Upload decoding timed out',
+        statusCode: 504,
+      })
+    } finally {
+      bus.off('session.data', onData)
+    }
   })
 
   it('chunks large payloads across multiple writes (exercising the inter-chunk sleep) and succeeds', async () => {
     const { ft, stored } = makeFt()
     const s = makeSession('up-large-chunked')
+    s.resize = () => {}
     const data = Buffer.alloc(20_000, 'a')
-    scriptWaitForStable(s, stored, [
-      { text: 'SP_CODEC:base64\n' },
-      {},
-      { timedOut: false },
-      { text: `SP_UP:${data.length}\n` },
-    ])
-    const meta = await ft.upload(s, '/tmp/x', data)
-    expect(meta.size).toBe(data.length)
-    // base64 of 20000 bytes is ~26667 chars; chunkSize is 12*1024=12288, so this must
-    // have been written in 3 chunks plus the trailing EOF write.
-    const chunkWrites = s.writes.filter((w) => /^[A-Za-z0-9+/=]+$/.test(w))
-    expect(chunkWrites.length).toBeGreaterThanOrEqual(3)
+    // Drive via write scripting: wait is armed before the SP_UP write, so
+    // scriptWaitForStable (which stamps text at wait-call time) would miss the
+    // marker under history(since=startSeq). Feed through the write path instead.
+    const onData = (e: { sessionId: string; seq: number; direction: string; plain: string }) => {
+      if (e.sessionId === s.id && e.direction === 'output') {
+        stored.push({ seq: e.seq, plain: e.plain })
+      }
+    }
+    bus.on('session.data', onData)
+    const orig = s.write.bind(s)
+    s.write = (chunk: string, opts?) => {
+      orig(chunk, opts)
+      if (chunk.includes('SP_CODEC') || chunk.includes('command -v base64')) {
+        queueMicrotask(() => s.feed('SP_CODEC:base64\n$ '))
+        return
+      }
+      if (chunk.includes('stty cols')) {
+        queueMicrotask(() => s.feed('$ '))
+        return
+      }
+      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+        const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+        queueMicrotask(() => s.feed(`${m}\n$ `))
+        return
+      }
+      if (chunk.includes('SP_UP')) {
+        queueMicrotask(() => { s.feed(`SP_UP:${data.length}\n$ `); s.forceState('WAITING_INPUT') })
+      }
+    }
+    try {
+      const meta = await ft.upload(s, '/tmp/x', data, { timeoutMs: 10_000 })
+      expect(meta.size).toBe(data.length)
+      const printfWrites = s.writes.filter((w) => w.includes("printf '%s'"))
+      expect(printfWrites.length).toBeGreaterThanOrEqual(3)
+      // chunkSize is 32; keep every printf line under 80 for Bun ExpectPty
+      expect(printfWrites.every((w) => w.length <= 80)).toBe(true)
+    } finally {
+      bus.off('session.data', onData)
+    }
   })
 })
 

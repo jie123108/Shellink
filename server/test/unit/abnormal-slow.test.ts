@@ -117,47 +117,39 @@ describe('abnormal slow / partial PTY', () => {
     const ft = new FileTransfer(historySource, new SessionOpLock())
     const s = new MockSession({ id: 'up-recover' })
     s.forceState('WAITING_INPUT')
+    s.resize = () => {}
     const data = Buffer.from('hi')
 
     let hang = true
     const orig = s.write.bind(s)
-    const installHandler = () => {
-      s.write = (chunk: string, opts?) => {
-        orig(chunk, opts)
-        queueMicrotask(() => {
-          if (chunk.includes('SP_CODEC')) {
-            s.feed('SP_CODEC:base64\n$ ')
-            return
+    s.write = (chunk: string, opts?) => {
+      orig(chunk, opts)
+      queueMicrotask(() => {
+        if (chunk.includes('SP_CODEC')) {
+          s.feed('SP_CODEC:base64\n$ ')
+          return
+        }
+        if (chunk.includes('stty cols')) {
+          s.feed('$ ')
+          return
+        }
+        if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+          if (!hang) {
+            const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+            s.feed(`${m}\n$ `)
           }
-          if (chunk.includes('stty -echo')) {
-            s.feed('$ ')
-            return
-          }
-          if (chunk.includes('base64 -d') || chunk.includes('openssl base64')) {
-            if (hang) return
-            return
-          }
-          if (chunk.includes('SPEOF_')) {
-            if (hang) return
-            s.feed('$ ')
-            return
-          }
-          if (chunk.includes('rm -f') && chunk.includes('.shellink-xfer')) {
-            s.forceState('WAITING_INPUT')
-            s.feed('$ ')
-            return
-          }
-          if (chunk.includes('mv -f') || chunk.includes('wc -c') || chunk.includes('SP_UP')) {
-            s.feed(`SP_UP:${data.length}\n$ `)
-            return
-          }
-          if (chunk.includes('stty echo')) {
-            s.feed('$ ')
-          }
-        })
-      }
+          return
+        }
+        if (chunk.includes('SP_UP')) {
+          if (!hang) s.feed(`SP_UP:${data.length}\n$ `); s.forceState('WAITING_INPUT')
+          return
+        }
+        if (chunk.includes('rm -f') && chunk.includes('/tmp/b')) {
+          s.forceState('WAITING_INPUT')
+          s.feed('$ ')
+        }
+      })
     }
-    installHandler()
 
     try {
       await expect(ft.upload(s, '/tmp/r.txt', data, { timeoutMs: 400 })).rejects.toMatchObject({
@@ -165,37 +157,6 @@ describe('abnormal slow / partial PTY', () => {
       })
       hang = false
       s.forceState('WAITING_INPUT')
-      // mirror successful upload script from fileTransferUpload.test.ts
-      let phase: 'probe' | 'stty' | 'decode' | 'payload' | 'verify' = 'probe'
-      s.write = (chunk: string, opts?) => {
-        orig(chunk, opts)
-        queueMicrotask(() => {
-          if (chunk.includes('SP_CODEC')) {
-            phase = 'stty'
-            s.feed('SP_CODEC:base64\n$ ')
-            return
-          }
-          if (chunk.includes('stty -echo')) {
-            phase = 'decode'
-            s.feed('$ ')
-            return
-          }
-          if (chunk.includes('base64 -d') || chunk.includes('openssl base64')) {
-            phase = 'payload'
-            return
-          }
-          if (chunk.includes('SPEOF_') || (phase === 'payload' && chunk.startsWith('\n'))) {
-            phase = 'verify'
-            s.feed('$ ')
-            return
-          }
-          if (chunk.includes('mv -f') || chunk.includes('wc -c') || chunk.includes('SP_UP')) {
-            s.feed(`SP_UP:${data.length}\n$ `)
-            return
-          }
-          if (chunk.includes('stty echo')) s.feed('$ ')
-        })
-      }
       const meta = await ft.upload(s, '/tmp/r.txt', data, { timeoutMs: 5_000 })
       expect(meta.size).toBe(2)
     } finally {

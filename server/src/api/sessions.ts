@@ -60,7 +60,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       return result
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
-      if (/file size|Request file too large|FST_REQ_FILE_TOO_LARGE/i.test(message)) return reply.code(413).send({ error: `File is too large; limit is ${config.transferMaxBytes} bytes` })
+      if (/Request file too large|FST_REQ_FILE_TOO_LARGE|File is too large/i.test(message)) return reply.code(413).send({ error: `File is too large; limit is ${config.transferMaxBytes} bytes` })
       return sendError(reply, error)
     }
   })
@@ -101,7 +101,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       return { ok: true, ...result }
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
-      if (/file size|Request file too large|FST_REQ_FILE_TOO_LARGE/i.test(message)) return reply.code(413).send({ error: `File is too large; limit is ${config.transferMaxBytes} bytes` })
+      if (/Request file too large|FST_REQ_FILE_TOO_LARGE|File is too large/i.test(message)) return reply.code(413).send({ error: `File is too large; limit is ${config.transferMaxBytes} bytes` })
       return sendError(reply, error)
     }
   })

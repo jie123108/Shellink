@@ -46,38 +46,26 @@ describe('coverage gaps: FileTransfer scripted errors', () => {
     const ft = new FileTransfer(historySource, new SessionOpLock())
     const s = new MockSession({ id: 'ft-gap-up' })
     s.forceState('WAITING_INPUT')
+    s.resize = () => {}
 
-    let phase: 'probe' | 'stty' | 'decode' | 'verify' | 'hang' = 'probe'
     const orig = s.write.bind(s)
     s.write = (chunk: string, opts?) => {
       orig(chunk, opts)
       queueMicrotask(() => {
         if (chunk.includes('SP_CODEC')) {
-          phase = 'stty'
           s.feed('SP_CODEC:base64\n$ ')
           return
         }
-        if (chunk.includes('stty -echo')) {
-          phase = 'decode'
+        if (chunk.includes('stty cols')) {
           s.feed('$ ')
           return
         }
-        if (chunk.includes('base64 -d') || chunk.includes('openssl base64')) {
-          phase = 'hang'
-          // never settle → upload decode timeout
+        if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+          const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+          s.feed(`${m}\n$ `)
           return
         }
-        if (chunk.includes('SPEOF_') || chunk.startsWith('\n')) {
-          if (phase === 'hang') return
-          phase = 'verify'
-          s.feed('$ ')
-          return
-        }
-        if (chunk.includes('SP_UP') || chunk.includes('wc -c')) {
-          s.feed('SP_UP:999\n$ ')
-          return
-        }
-        if (chunk.includes('stty echo')) s.feed('$ ')
+        // finalize: stay silent → timeout
       })
     }
 
@@ -86,8 +74,6 @@ describe('coverage gaps: FileTransfer scripted errors', () => {
         statusCode: 504,
       })
 
-      // size mismatch path
-      phase = 'probe'
       s.forceState('WAITING_INPUT')
       s.write = (chunk: string, opts?) => {
         orig(chunk, opts)
@@ -96,20 +82,18 @@ describe('coverage gaps: FileTransfer scripted errors', () => {
             s.feed('SP_CODEC:base64\n$ ')
             return
           }
-          if (chunk.includes('stty -echo')) {
+          if (chunk.includes('stty cols')) {
             s.feed('$ ')
             return
           }
-          if (chunk.includes('base64 -d') || chunk.includes('openssl base64')) return
-          if (chunk.includes('SPEOF_') || chunk.startsWith('\n')) {
-            s.feed('$ ')
+          if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+            const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
+            s.feed(`${m}\n$ `)
             return
           }
-          if (chunk.includes('SP_UP') || chunk.includes('wc -c')) {
-            s.feed('SP_UP:999\n$ ')
-            return
+          if (chunk.includes('SP_UP')) {
+            s.feed('SP_UP:999\n$ '); s.forceState('WAITING_INPUT')
           }
-          if (chunk.includes('stty echo')) s.feed('$ ')
         })
       }
       await expect(ft.upload(s, '/tmp/x', Buffer.from('hi'), { timeoutMs: 5_000 })).rejects.toMatchObject({
