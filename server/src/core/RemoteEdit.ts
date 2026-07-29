@@ -2,6 +2,8 @@ import crypto from 'node:crypto'
 import { config } from '../config.js'
 import type { BaseSession } from './BaseSession.js'
 import {
+  echoProofEcho,
+  hasMarkerLine,
   shellQuote,
   type TransferHistorySource,
   validateRemotePath,
@@ -34,7 +36,9 @@ import sys, json, os, tempfile
 
 def fail(code, msg):
     msg = str(msg).replace("\\n", " ").replace("\\r", " ")
-    sys.stdout.write("SP_EDIT:err:%s:%s\\n" % (code, msg))
+    # Leading \\n: local echo is off by the time this runs, so a bare marker can land
+    # glued to a no-newline shell prompt and silently fail the line-anchored match.
+    sys.stdout.write("\\nSP_EDIT:err:%s:%s\\n" % (code, msg))
     sys.exit(0)
 
 try:
@@ -140,7 +144,7 @@ except Exception as e:
         pass
     fail("write", e)
 
-sys.stdout.write("SP_EDIT:ok:%d\\n" % len(matches))
+sys.stdout.write("\\nSP_EDIT:ok:%d\\n" % len(matches))
 `.trim()
 
 function sleep(ms: number): Promise<void> {
@@ -221,7 +225,7 @@ export class RemoteEdit {
   }
 
   /** 加宽 PTY，避免长命令被终端折行插入空格破坏路径/参数 */
-  private async widenPty(session: BaseSession, timeoutMs: number): Promise<void> {
+  private async widenPty(session: BaseSession, timeoutMs: number, signal?: AbortSignal): Promise<void> {
     try {
       session.resize(10_000, 50)
     } catch {
@@ -231,6 +235,7 @@ export class RemoteEdit {
       session,
       'stty cols 10000 rows 50 2>/dev/null || stty cols 2000 rows 50 2>/dev/null || true',
       Math.min(timeoutMs, 10_000),
+      signal,
     ).catch(() => {})
   }
 
@@ -238,15 +243,16 @@ export class RemoteEdit {
     session: BaseSession,
     command: string,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<{ output: string; timedOut: boolean; state: string }> {
     const startSeq = session.lastSeq
     session.write(command.endsWith('\n') || command.endsWith('\r') ? command : command + '\n')
-    const { state, timedOut } = await session.waitForStable(timeoutMs)
+    const { state, timedOut } = await session.waitForStable(timeoutMs, { signal })
     const { text } = this.historySource.history(session.id, startSeq, 50_000)
     return { output: text, timedOut, state }
   }
 
-  private async probeEngine(session: BaseSession, timeoutMs: number): Promise<EditEngine> {
+  private async probeEngine(session: BaseSession, timeoutMs: number, signal?: AbortSignal): Promise<EditEngine> {
     const cached = this.engineCache.get(session.id)
     if (cached) return cached
 
@@ -265,6 +271,7 @@ export class RemoteEdit {
         'fi',
       ].join('\n'),
       Math.min(timeoutMs, 30_000),
+      signal,
     )
     if (probe.timedOut) {
       throw new TransferError('Timed out probing remote edit engines', 504)
@@ -284,17 +291,20 @@ export class RemoteEdit {
     throw new TransferError('No remote edit engine is available (requires python3, python>=3, or sed)', 502)
   }
 
-  private async probeDecoder(session: BaseSession, timeoutMs: number): Promise<'openssl' | 'base64'> {
+  private async probeDecoder(session: BaseSession, timeoutMs: number, signal?: AbortSignal): Promise<'openssl' | 'base64'> {
     const cached = this.decodeCache.get(session.id)
     if (cached) return cached
+    // Leading \n on each branch: this probe runs after stty -echo in the caller, so a
+    // bare `echo` can land glued to a no-newline shell prompt and fail the line-anchored match.
     const probe = await this.execCapture(
       session,
       [
-        'if command -v openssl >/dev/null 2>&1; then echo SP_DEC:openssl',
-        'elif command -v base64 >/dev/null 2>&1; then echo SP_DEC:base64',
-        'else echo SP_DEC:none; fi',
+        "if command -v openssl >/dev/null 2>&1; then printf '\\nSP_DEC:openssl\\n'",
+        "elif command -v base64 >/dev/null 2>&1; then printf '\\nSP_DEC:base64\\n'",
+        "else printf '\\nSP_DEC:none\\n'; fi",
       ].join('\n'),
       Math.min(timeoutMs, 15_000),
+      signal,
     )
     if (probe.timedOut) throw new TransferError('Timed out probing the remote decoder', 504)
     const m = (() => {
@@ -317,6 +327,7 @@ export class RemoteEdit {
     data: Buffer,
     timeoutMs: number,
     decoder: 'openssl' | 'base64',
+    signal?: AbortSignal,
   ): Promise<void> {
     const token = crypto.randomBytes(4).toString('hex')
     const out = shellQuote(remotePath)
@@ -325,33 +336,26 @@ export class RemoteEdit {
     const b64 = data.toString('base64')
     const marker = `SP_WROTE_${token}`
 
-    // Keep full printf line under 80 cols: Bun ExpectPty may not resize.
-    // Sync periodically so PTY/SSH buffers do not drop printf lines.
-    const chunkSize = 32
-    const syncEvery = 64
+    // One chunk per write, each carrying its own acknowledgement, and never more than
+    // one line in flight. A tty input queue only holds ~1024 bytes and an interactive
+    // shell drains it slowly, so anything pushed past that is dropped by the kernel
+    // mid-line and leaves the shell stuck on a PS2 continuation. See FileTransfer's
+    // burstWrite for the failure this pacing was derived from.
+    const chunkSize = 768
     session.write(`: > ${quotedB64}\n`)
-    let chunksSinceSync = 0
     for (let i = 0; i < b64.length; i += chunkSize) {
       const chunk = b64.slice(i, i + chunkSize)
-      session.write(`printf '%s' '${chunk}' >> ${quotedB64}\n`)
-      chunksSinceSync += 1
-      const isLast = i + chunkSize >= b64.length
-      if (!isLast && chunksSinceSync >= syncEvery) {
-        const sync = `SP_S_${token}_${i}`
-        const syncSeq = session.lastSeq
-        session.write(`echo ${sync}\n`)
-        const deadline = Date.now() + timeoutMs
-        for (;;) {
-          const { text } = this.historySource.history(session.id, syncSeq, 50_000)
-          if (text.includes(sync)) break
-          if (Date.now() >= deadline || session.state === 'DISCONNECTED') {
-            throw new TransferError('Timed out writing the remote temporary file', 504)
-          }
-          await sleep(40)
+      const sync = `SP_S_${token}_${i}`
+      const syncSeq = session.lastSeq
+      session.write(`printf '%s' '${chunk}' >> ${quotedB64}; ${echoProofEcho(sync)}\n`)
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const { text } = this.historySource.history(session.id, syncSeq, 50_000)
+        if (hasMarkerLine(text, sync)) break
+        if (signal?.aborted || Date.now() >= deadline || session.state === 'DISCONNECTED') {
+          throw new TransferError(signal?.aborted ? 'Edit canceled' : 'Timed out writing the remote temporary file', signal?.aborted ? 499 : 504)
         }
-        chunksSinceSync = 0
-      } else if (!isLast) {
-        await sleep(1)
+        await sleep(4)
       }
     }
 
@@ -362,31 +366,32 @@ export class RemoteEdit {
 
     const drain = `SP_DRAIN_${token}`
     let startSeq = session.lastSeq
-    session.write(`echo ${drain}\n`)
+    session.write(`${echoProofEcho(drain)}\n`)
     const drainDeadline = Date.now() + timeoutMs
     for (;;) {
       const { text } = this.historySource.history(session.id, startSeq, 50_000)
-      if (text.includes(drain)) break
-      if (Date.now() >= drainDeadline || session.state === 'DISCONNECTED') {
-        throw new TransferError('Timed out writing the remote temporary file', 504)
+      if (hasMarkerLine(text, drain)) break
+      if (signal?.aborted || Date.now() >= drainDeadline || session.state === 'DISCONNECTED') {
+        throw new TransferError(signal?.aborted ? 'Edit canceled' : 'Timed out writing the remote temporary file', signal?.aborted ? 499 : 504)
       }
       await sleep(40)
     }
 
     startSeq = session.lastSeq
-    session.write(`${decode}; rm -f ${quotedB64}; echo ${marker}\n`)
+    session.write(`${decode}; rm -f ${quotedB64}; ${echoProofEcho(marker)}\n`)
     const writeDeadline = Date.now() + timeoutMs
     for (;;) {
       const { text } = this.historySource.history(session.id, startSeq, 50_000)
-      if (text.includes(marker)) break
-      if (Date.now() >= writeDeadline || session.state === 'DISCONNECTED') {
-        throw new TransferError('Timed out writing the remote temporary file', 504)
+      if (hasMarkerLine(text, marker)) break
+      if (signal?.aborted || Date.now() >= writeDeadline || session.state === 'DISCONNECTED') {
+        throw new TransferError(signal?.aborted ? 'Edit canceled' : 'Timed out writing the remote temporary file', signal?.aborted ? 499 : 504)
       }
       await sleep(40)
     }
     {
       const settleDeadline = Date.now() + 5_000
       while (Date.now() < settleDeadline) {
+        if (signal?.aborted) break
         const state = session.state
         if (state === 'WAITING_INPUT' || state === 'DISCONNECTED') break
         await sleep(40)
@@ -401,6 +406,7 @@ export class RemoteEdit {
     edits: TextEdit[],
     timeoutMs: number,
     startAt: number,
+    signal?: AbortSignal,
   ): Promise<RemoteEditResult> {
     const id = crypto.randomBytes(4).toString('hex')
     const payloadObj = { path: pathClean, edits }
@@ -411,18 +417,18 @@ export class RemoteEdit {
     const scriptPath = `/tmp/spe${id}.py`
     const payloadPath = `/tmp/spe${id}.json`
 
-    await this.widenPty(session, timeoutMs)
-    await this.execCapture(session, 'stty -echo 2>/dev/null || true', 10_000)
+    await this.widenPty(session, timeoutMs, signal)
+    await this.execCapture(session, 'stty -echo 2>/dev/null || true', 10_000, signal)
     this.assertReady(session)
 
-    const decoder = await this.probeDecoder(session, timeoutMs)
+    const decoder = await this.probeDecoder(session, timeoutMs, signal)
     this.assertReady(session)
 
     try {
       const stepTimeout = Math.max(Math.floor((timeoutMs - (Date.now() - startAt)) / 3), 10_000)
-      await this.writeRemoteBase64File(session, scriptPath, scriptBytes, stepTimeout, decoder)
+      await this.writeRemoteBase64File(session, scriptPath, scriptBytes, stepTimeout, decoder, signal)
       this.assertReady(session)
-      await this.writeRemoteBase64File(session, payloadPath, payloadBytes, stepTimeout, decoder)
+      await this.writeRemoteBase64File(session, payloadPath, payloadBytes, stepTimeout, decoder, signal)
       this.assertReady(session)
 
       const remaining = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
@@ -434,10 +440,11 @@ export class RemoteEdit {
           'stty echo 2>/dev/null || true',
         ].join('; '),
         remaining,
+        signal,
       )
       if (r.timedOut) {
         await this.execCapture(session, 'stty echo 2>/dev/null || true', 10_000).catch(() => {})
-        throw new TransferError('Remote edit timed out', 504)
+        throw new TransferError(signal?.aborted ? 'Edit canceled' : 'Remote edit timed out', signal?.aborted ? 499 : 504)
       }
       const parsed = parseEditResult(r.output)
       if (!parsed.ok) throw mapEditError(parsed.code, parsed.message)
@@ -464,6 +471,7 @@ export class RemoteEdit {
     edits: TextEdit[],
     timeoutMs: number,
     startAt: number,
+    signal?: AbortSignal,
   ): Promise<RemoteEditResult> {
     if (edits.length !== 1) {
       throw new TransferError(
@@ -503,8 +511,8 @@ export class RemoteEdit {
       `echo SP_EDIT:ok:1`,
     ].join('; ')
 
-    const r = await this.execCapture(session, cmd, remaining)
-    if (r.timedOut) throw new TransferError('Remote edit timed out', 504)
+    const r = await this.execCapture(session, cmd, remaining, signal)
+    if (r.timedOut) throw new TransferError(signal?.aborted ? 'Edit canceled' : 'Remote edit timed out', signal?.aborted ? 499 : 504)
     const parsed = parseEditResult(r.output)
     if (!parsed.ok) throw mapEditError(parsed.code, parsed.message)
     return {
@@ -521,6 +529,7 @@ export class RemoteEdit {
     remotePath: string,
     edits: TextEdit[],
     timeoutMs = config.editTimeoutMs,
+    signal?: AbortSignal,
   ): Promise<RemoteEditResult> {
     const pathClean = validateRemotePath(remotePath)
     if (!Array.isArray(edits) || edits.length === 0) {
@@ -540,13 +549,13 @@ export class RemoteEdit {
 
     return this.opLock.withLock(session.id, async () => {
       const startAt = Date.now()
-      const engine = await this.probeEngine(session, timeoutMs)
+      const engine = await this.probeEngine(session, timeoutMs, signal)
       this.assertReady(session)
 
       if (engine === 'python3' || engine === 'python') {
-        return this.runPythonEdit(session, engine, pathClean, edits, timeoutMs, startAt)
+        return this.runPythonEdit(session, engine, pathClean, edits, timeoutMs, startAt, signal)
       }
-      return this.runSedEdit(session, pathClean, edits, timeoutMs, startAt)
+      return this.runSedEdit(session, pathClean, edits, timeoutMs, startAt, signal)
     })
   }
 }

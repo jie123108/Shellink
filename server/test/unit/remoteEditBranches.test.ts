@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { RemoteEdit } from '../../src/core/RemoteEdit.js'
 import { SessionOpLock } from '../../src/core/SessionOpLock.js'
+import { extractEchoProofMarker } from '../helpers/echoProofMarker.js'
 import { MockSession } from '../helpers/mockSession.js'
 
 type Step = { timedOut?: boolean; text?: string }
@@ -39,6 +40,22 @@ function scriptWaitForStable(
   }
 }
 
+/**
+ * writeRemoteBase64File polls `historySource.history()` directly for its
+ * echo-proof sync/drain/write markers instead of going through waitForStable,
+ * so scriptWaitForStable's steps never see those writes. Answer them here.
+ */
+function scriptWriteMarkers(s: MockSession, stored: Array<{ seq: number; plain: string }>): void {
+  const orig = s.write.bind(s)
+  s.write = (chunk: string, opts?) => {
+    orig(chunk, opts)
+    if (chunk.includes("printf '\\n%s%s\\n'")) {
+      const marker = extractEchoProofMarker(chunk)
+      if (marker) stored.push({ seq: s.lastSeq, plain: `${marker}\n` })
+    }
+  }
+}
+
 describe('RemoteEdit.edit error branches', () => {
   it('reports a timeout when probing the remote edit engine never stabilizes', async () => {
     const { re, stored } = makeRe()
@@ -63,7 +80,8 @@ describe('RemoteEdit.edit error branches', () => {
   it('reports a timeout when probing the remote base64 decoder never stabilizes', async () => {
     const { re, stored } = makeRe()
     const s = makeSession('re-decoder-timeout')
-    scriptWaitForStable(s, stored, [{ text: 'SP_EDIT_ENGINE:python3\n' }, {}, { timedOut: true }])
+    // Steps: probeEngine, widenPty (stty cols), stty -echo, probeDecoder (times out).
+    scriptWaitForStable(s, stored, [{ text: 'SP_EDIT_ENGINE:python3\n' }, {}, {}, { timedOut: true }])
     await expect(re.edit(s, '/tmp/x', [{ oldText: 'a', newText: 'b' }])).rejects.toMatchObject({
       message: 'Timed out probing the remote decoder',
       statusCode: 504,
@@ -73,12 +91,15 @@ describe('RemoteEdit.edit error branches', () => {
   it('succeeds via the python (not python3) engine using the openssl decoder', async () => {
     const { re, stored } = makeRe()
     const s = makeSession('re-python-openssl')
+    scriptWriteMarkers(s, stored)
+    // Steps: probeEngine, widenPty (stty cols), stty -echo, probeDecoder, run python.
+    // writeRemoteBase64File (script + payload) polls history markers directly,
+    // answered by scriptWriteMarkers instead of consuming a step here.
     scriptWaitForStable(s, stored, [
       { text: 'SP_EDIT_ENGINE:python\n' },
       {},
+      {},
       { text: 'SP_DEC:openssl\n' },
-      {},
-      {},
       { text: 'SP_EDIT:ok:1\n' },
     ])
     const r = await re.edit(s, '/tmp/x', [{ oldText: 'a', newText: 'b' }])
@@ -89,12 +110,12 @@ describe('RemoteEdit.edit error branches', () => {
   it('maps an error result with an empty error message to a default 502', async () => {
     const { re, stored } = makeRe()
     const s = makeSession('re-empty-err')
+    scriptWriteMarkers(s, stored)
     scriptWaitForStable(s, stored, [
       { text: 'SP_EDIT_ENGINE:python3\n' },
       {},
+      {},
       { text: 'SP_DEC:base64\n' },
-      {},
-      {},
       { text: 'SP_EDIT:err:\n' },
     ])
     await expect(re.edit(s, '/tmp/x', [{ oldText: 'a', newText: 'b' }])).rejects.toMatchObject({
@@ -106,12 +127,12 @@ describe('RemoteEdit.edit error branches', () => {
   it('rejects when the ok marker reports a non-numeric replaced count', async () => {
     const { re, stored } = makeRe()
     const s = makeSession('re-bad-count')
+    scriptWriteMarkers(s, stored)
     scriptWaitForStable(s, stored, [
       { text: 'SP_EDIT_ENGINE:python3\n' },
       {},
+      {},
       { text: 'SP_DEC:base64\n' },
-      {},
-      {},
       { text: 'SP_EDIT:ok:notanumber\n' },
     ])
     await expect(re.edit(s, '/tmp/x', [{ oldText: 'a', newText: 'b' }])).rejects.toMatchObject({
@@ -126,12 +147,12 @@ describe('RemoteEdit.edit error branches', () => {
     s.resize = () => {
       throw new Error('resize not supported')
     }
+    scriptWriteMarkers(s, stored)
     scriptWaitForStable(s, stored, [
       { text: 'SP_EDIT_ENGINE:python3\n' },
       {},
+      {},
       { text: 'SP_DEC:base64\n' },
-      {},
-      {},
       { text: 'SP_EDIT:ok:1\n' },
     ])
     const r = await re.edit(s, '/tmp/x', [{ oldText: 'a', newText: 'b' }])

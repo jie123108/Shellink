@@ -8,6 +8,7 @@ import { SessionOpLock } from '../../src/core/SessionOpLock.js'
 import { sessionManager } from '../../src/core/SessionManager.js'
 import { resolveSshPrivateKey } from '../../src/core/sshIdentity.js'
 import { TransferError } from '../../src/core/TransferError.js'
+import { extractEchoProofMarker } from '../helpers/echoProofMarker.js'
 import { MockSession } from '../helpers/mockSession.js'
 
 function trackOutput(sessionId: string) {
@@ -64,14 +65,30 @@ describe('RemoteEdit catch cleanup and defensive branches', () => {
     s.forceState('WAITING_INPUT')
     s.resize = () => {}
 
+    // writeRemoteBase64File polls history directly for its echo-proof markers
+    // instead of going through waitForStable; answer those on the write path.
+    const origWrite = s.write.bind(s)
+    s.write = (chunk: string, writeOpts?) => {
+      origWrite(chunk, writeOpts)
+      if (chunk.includes("printf '\\n%s%s\\n'")) {
+        const marker = extractEchoProofMarker(chunk)
+        if (marker) {
+          queueMicrotask(() => {
+            s.feed(`${marker}\n$ `)
+            s.forceState('WAITING_INPUT')
+          })
+        }
+      }
+    }
+
+    // Order of waitForStable calls in runPythonEdit: probeEngine, widenPty
+    // (stty cols), stty -echo probe, probeDecoder, then the run-python exec.
     const replies = [
       'SP_EDIT_ENGINE:python3\n$ ', // probeEngine
+      '$ ', // widenPty stty cols
       '$ ', // stty -echo
       'SP_DEC:base64\n$ ', // probeDecoder
-      '$ ', // write script
-      '$ ', // write payload
       'SP_EDIT:err:not_found:Could not find the exact text\n$ ', // run python (errors)
-      '$ ', // cleanup rm -f
     ]
     let step = 0
     const origWait = s.waitForStable.bind(s)

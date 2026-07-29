@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { bus } from '../../src/core/events.js'
 import { RemoteEdit } from '../../src/core/RemoteEdit.js'
 import { SessionOpLock } from '../../src/core/SessionOpLock.js'
+import { extractEchoProofMarker } from '../helpers/echoProofMarker.js'
 import { MockSession } from '../helpers/mockSession.js'
 
 type Step = { timeout: true } | { text: string }
@@ -22,26 +23,14 @@ function scriptWriteMarkers(s: MockSession, opts: { hangWrite?: boolean } = {}):
   const orig = s.write.bind(s)
   s.write = (chunk: string, writeOpts?) => {
     orig(chunk, writeOpts)
-    if (opts.hangWrite) {
-      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_') || chunk.includes('SP_WROTE_')) {
-        return
-      }
-    }
-    if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
-      const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-      if (m) {
-        queueMicrotask(() => {
-          s.feed(`${m}\n$ `)
-          s.forceState('WAITING_INPUT')
-        })
-      }
+    if (opts.hangWrite && chunk.includes("printf '\\n%s%s\\n'")) {
       return
     }
-    if (chunk.includes('SP_WROTE_')) {
-      const m = chunk.match(/SP_WROTE_[a-f0-9]+/)?.[0]
-      if (m) {
+    if (chunk.includes("printf '\\n%s%s\\n'")) {
+      const marker = extractEchoProofMarker(chunk)
+      if (marker) {
         queueMicrotask(() => {
-          s.feed(`${m}\n$ `)
+          s.feed(`${marker}\n$ `)
           s.forceState('WAITING_INPUT')
         })
       }

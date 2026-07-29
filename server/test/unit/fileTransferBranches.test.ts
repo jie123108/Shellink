@@ -3,6 +3,7 @@ import { config } from '../../src/config.js'
 import { bus } from '../../src/core/events.js'
 import { FileTransfer } from '../../src/core/FileTransfer.js'
 import { SessionOpLock } from '../../src/core/SessionOpLock.js'
+import { extractEchoProofMarker } from '../helpers/echoProofMarker.js'
 import { MockSession } from '../helpers/mockSession.js'
 
 type Step = { timedOut?: boolean; text?: string }
@@ -111,6 +112,7 @@ describe('FileTransfer.upload error and chunking branches', () => {
       if (e.sessionId === s.id && e.direction === 'output') stored.push({ seq: e.seq, plain: e.plain })
     }
     bus.on('session.data', onData)
+    const encoded = Buffer.from('hi').toString('base64')
     const orig = s.write.bind(s)
     s.write = (chunk: string, opts?) => {
       orig(chunk, opts)
@@ -118,14 +120,20 @@ describe('FileTransfer.upload error and chunking branches', () => {
         queueMicrotask(() => s.feed('SP_CODEC:base64\n$ '))
         return
       }
-      if (chunk.includes('stty cols')) {
+      if (chunk.includes('stty cols') || chunk.includes('stty -echo') || chunk.includes('stty echo')) {
         queueMicrotask(() => s.feed('$ '))
         return
       }
-      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
-        const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-        queueMicrotask(() => s.feed(`${m}\n$ `))
+      if (chunk.includes('SP_SZ')) {
+        queueMicrotask(() => s.feed(`SP_SZ:${encoded.length}\n$ `))
         return
+      }
+      if (chunk.includes("printf '\\n%s%s\\n'")) {
+        const marker = extractEchoProofMarker(chunk)
+        if (marker) {
+          queueMicrotask(() => s.feed(`${marker}\n$ `))
+          return
+        }
       }
       // finalize: stay silent → marker wait times out
     }
@@ -147,6 +155,7 @@ describe('FileTransfer.upload error and chunking branches', () => {
       if (e.sessionId === s.id && e.direction === 'output') stored.push({ seq: e.seq, plain: e.plain })
     }
     bus.on('session.data', onData)
+    const encoded = Buffer.from('hi').toString('base64')
     const orig = s.write.bind(s)
     s.write = (chunk: string, opts?) => {
       orig(chunk, opts)
@@ -154,14 +163,20 @@ describe('FileTransfer.upload error and chunking branches', () => {
         queueMicrotask(() => s.feed('SP_CODEC:base64\n$ '))
         return
       }
-      if (chunk.includes('stty cols')) {
+      if (chunk.includes('stty cols') || chunk.includes('stty -echo') || chunk.includes('stty echo')) {
         queueMicrotask(() => s.feed('$ '))
         return
       }
-      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
-        const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-        queueMicrotask(() => s.feed(`${m}\n$ `))
+      if (chunk.includes('SP_SZ')) {
+        queueMicrotask(() => s.feed(`SP_SZ:${encoded.length}\n$ `))
         return
+      }
+      if (chunk.includes("printf '\\n%s%s\\n'")) {
+        const marker = extractEchoProofMarker(chunk)
+        if (marker) {
+          queueMicrotask(() => s.feed(`${marker}\n$ `))
+          return
+        }
       }
       if (chunk.includes('SP_UP')) {
         // produce output without the SP_UP:N marker the uploader requires
@@ -183,6 +198,7 @@ describe('FileTransfer.upload error and chunking branches', () => {
     const s = makeSession('up-large-chunked')
     s.resize = () => {}
     const data = Buffer.alloc(20_000, 'a')
+    const encoded = data.toString('base64')
     // Drive via write scripting: wait is armed before the SP_UP write, so
     // scriptWaitForStable (which stamps text at wait-call time) would miss the
     // marker under history(since=startSeq). Feed through the write path instead.
@@ -199,14 +215,20 @@ describe('FileTransfer.upload error and chunking branches', () => {
         queueMicrotask(() => s.feed('SP_CODEC:base64\n$ '))
         return
       }
-      if (chunk.includes('stty cols')) {
+      if (chunk.includes('stty cols') || chunk.includes('stty -echo') || chunk.includes('stty echo')) {
         queueMicrotask(() => s.feed('$ '))
         return
       }
-      if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
-        const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-        queueMicrotask(() => s.feed(`${m}\n$ `))
+      if (chunk.includes('SP_SZ')) {
+        queueMicrotask(() => s.feed(`SP_SZ:${encoded.length}\n$ `))
         return
+      }
+      if (chunk.includes("printf '\\n%s%s\\n'")) {
+        const marker = extractEchoProofMarker(chunk)
+        if (marker) {
+          queueMicrotask(() => s.feed(`${marker}\n$ `))
+          return
+        }
       }
       if (chunk.includes('SP_UP')) {
         queueMicrotask(() => { s.feed(`SP_UP:${data.length}\n$ `); s.forceState('WAITING_INPUT') })
@@ -217,8 +239,9 @@ describe('FileTransfer.upload error and chunking branches', () => {
       expect(meta.size).toBe(data.length)
       const printfWrites = s.writes.filter((w) => w.includes("printf '%s'"))
       expect(printfWrites.length).toBeGreaterThanOrEqual(3)
-      // chunkSize is 32; keep every printf line under 80 for Bun ExpectPty
-      expect(printfWrites.every((w) => w.length <= 80)).toBe(true)
+      // chunkSize is 512 with up to 4 printf lines merged per write; each batch
+      // stays well under the widened PTY column width (stty cols 10000/2000).
+      expect(printfWrites.every((w) => w.length <= 3000)).toBe(true)
     } finally {
       bus.off('session.data', onData)
     }

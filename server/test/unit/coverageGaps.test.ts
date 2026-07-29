@@ -8,6 +8,7 @@ import { LocalPtySession } from '../../src/core/LocalPtySession.js'
 import { mapEditError, RemoteEdit } from '../../src/core/RemoteEdit.js'
 import { SessionOpLock } from '../../src/core/SessionOpLock.js'
 import { setupWsGateway } from '../../src/ws/gateway.js'
+import { extractEchoProofMarker } from '../helpers/echoProofMarker.js'
 import { MockSession } from '../helpers/mockSession.js'
 import { TestClient, waitForState } from '../helpers/client.js'
 import { resetDb } from '../helpers/resetDb.js'
@@ -48,6 +49,7 @@ describe('coverage gaps: FileTransfer scripted errors', () => {
     s.forceState('WAITING_INPUT')
     s.resize = () => {}
 
+    const encoded = Buffer.from('hi').toString('base64')
     const orig = s.write.bind(s)
     s.write = (chunk: string, opts?) => {
       orig(chunk, opts)
@@ -56,14 +58,20 @@ describe('coverage gaps: FileTransfer scripted errors', () => {
           s.feed('SP_CODEC:base64\n$ ')
           return
         }
-        if (chunk.includes('stty cols')) {
+        if (chunk.includes('stty cols') || chunk.includes('stty -echo') || chunk.includes('stty echo')) {
           s.feed('$ ')
           return
         }
-        if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
-          const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-          s.feed(`${m}\n$ `)
+        if (chunk.includes('SP_SZ')) {
+          s.feed(`SP_SZ:${encoded.length}\n$ `)
           return
+        }
+        if (chunk.includes("printf '\\n%s%s\\n'")) {
+          const marker = extractEchoProofMarker(chunk)
+          if (marker) {
+            s.feed(`${marker}\n$ `)
+            return
+          }
         }
         // finalize: stay silent → timeout
       })
@@ -82,14 +90,20 @@ describe('coverage gaps: FileTransfer scripted errors', () => {
             s.feed('SP_CODEC:base64\n$ ')
             return
           }
-          if (chunk.includes('stty cols')) {
+          if (chunk.includes('stty cols') || chunk.includes('stty -echo') || chunk.includes('stty echo')) {
             s.feed('$ ')
             return
           }
-          if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
-            const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-            s.feed(`${m}\n$ `)
+          if (chunk.includes('SP_SZ')) {
+            s.feed(`SP_SZ:${encoded.length}\n$ `)
             return
+          }
+          if (chunk.includes("printf '\\n%s%s\\n'")) {
+            const marker = extractEchoProofMarker(chunk)
+            if (marker) {
+              s.feed(`${marker}\n$ `)
+              return
+            }
           }
           if (chunk.includes('SP_UP')) {
             s.feed('SP_UP:999\n$ '); s.forceState('WAITING_INPUT')

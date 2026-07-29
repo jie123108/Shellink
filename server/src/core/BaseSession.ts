@@ -70,15 +70,24 @@ export abstract class BaseSession {
     return this.closed
   }
 
-  /** Wait until the session reaches a stable state. exec defaults to not treating IDLE as done. */
+  /**
+   * Wait until the session reaches a stable state. exec defaults to not treating IDLE
+   * as done. An aborted `signal` resolves immediately with `timedOut: true` — callers
+   * treat that the same as a real timeout, which lets long-running transfer/edit waits
+   * stop as soon as the caller cancels instead of blocking until timeoutMs elapses.
+   */
   waitForStable(
     timeoutMs: number,
-    opts: { acceptIdle?: boolean } = {},
+    opts: { acceptIdle?: boolean; signal?: AbortSignal } = {},
   ): Promise<{ state: SessionState; timedOut: boolean }> {
     const acceptIdle = opts.acceptIdle !== false
     return new Promise((resolve) => {
       if (this.state === 'DISCONNECTED') {
         resolve({ state: this.state, timedOut: false })
+        return
+      }
+      if (opts.signal?.aborted) {
+        resolve({ state: this.state, timedOut: true })
         return
       }
       const onState = (e: { sessionId: string; state: SessionState }) => {
@@ -92,6 +101,10 @@ export abstract class BaseSession {
           resolve({ state: e.state, timedOut: false })
         }
       }
+      const onAbort = () => {
+        cleanup()
+        resolve({ state: this.state, timedOut: true })
+      }
       const timer = setTimeout(() => {
         cleanup()
         resolve({ state: this.state, timedOut: true })
@@ -99,9 +112,21 @@ export abstract class BaseSession {
       const cleanup = () => {
         clearTimeout(timer)
         bus.off('session.state', onState)
+        opts.signal?.removeEventListener('abort', onAbort)
       }
       bus.on('session.state', onState)
+      opts.signal?.addEventListener('abort', onAbort)
     })
+  }
+
+  /**
+   * Optional backpressure hook for local-process transports. Bun's expect/pipe
+   * transports can silently drop input bytes when written faster than the OS pipe
+   * drains; overriding subclasses resolve once queued writes have flushed. SSH and
+   * mocked sessions have no such risk and resolve immediately.
+   */
+  drain(): Promise<void> {
+    return Promise.resolve()
   }
 
   /** Return the last N lines of recent plain output. */

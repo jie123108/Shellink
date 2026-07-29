@@ -11,6 +11,35 @@ interface PtyLike {
   kill(): void
   onData(listener: (data: string) => void): void
   onExit(listener: (event: { exitCode: number | null }) => void): void
+  /**
+   * Resolves once data queued by `write()` has flushed past the OS pipe buffer.
+   * Node's stdin.write() returns false and later emits 'drain' when the kernel pipe
+   * is full; without backpressure a write burst (e.g. large-file upload) can have
+   * bytes silently dropped rather than queued. Optional: node-pty's IPty writes
+   * directly to a real pty and does not need it.
+   */
+  whenDrained?(): Promise<void>
+}
+
+/** Shared backpressure tracking for a Writable child.stdin: queue writes until 'drain' fires. */
+function trackDrain(stdin: NodeJS.WritableStream): { write: (data: string) => void; whenDrained: () => Promise<void> } {
+  let pending: Promise<void> | null = null
+  return {
+    write(data: string): void {
+      const ok = stdin.write(data)
+      if (!ok && !pending) {
+        pending = new Promise<void>((resolve) => {
+          stdin.once('drain', () => {
+            pending = null
+            resolve()
+          })
+        })
+      }
+    },
+    whenDrained(): Promise<void> {
+      return pending ?? Promise.resolve()
+    },
+  }
 }
 
 /**
@@ -22,6 +51,7 @@ const BUN_PTY_DEFAULT_COLS = 2000
 
 class PipeProcess implements PtyLike {
   private readonly child: ChildProcessWithoutNullStreams
+  private readonly drain: ReturnType<typeof trackDrain>
 
   constructor(command: string, config: { term: string; cols: number; rows: number }) {
     const cols = Math.max(config.cols, BUN_PTY_DEFAULT_COLS)
@@ -30,9 +60,11 @@ class PipeProcess implements PtyLike {
       cwd: os.homedir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
+    this.drain = trackDrain(this.child.stdin)
   }
 
-  write(data: string): void { this.child.stdin.write(data) }
+  write(data: string): void { this.drain.write(data) }
+  whenDrained(): Promise<void> { return this.drain.whenDrained() }
   resize(_cols: number, _rows: number): void { /* Bun executable cannot embed node-pty's native resize ioctl */ }
   kill(): void { this.child.kill() }
   onData(listener: (data: string) => void): void {
@@ -49,6 +81,7 @@ class ExpectPty implements PtyLike {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly controlDir: string
   private readonly slavePathFile: string
+  private readonly drain: ReturnType<typeof trackDrain>
   private desiredSize: { cols: number; rows: number } | null = null
   private resizeTimer: NodeJS.Timeout | null = null
   private exited = false
@@ -82,12 +115,14 @@ class ExpectPty implements PtyLike {
       cwd: os.homedir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
+    this.drain = trackDrain(this.child.stdin)
     // Ensure the expect slave wins even if spawn raced the stty line.
     this.desiredSize = { cols, rows: config.rows }
     this.applyResizeOrRetry()
   }
 
-  write(data: string): void { this.child.stdin.write(data) }
+  write(data: string): void { this.drain.write(data) }
+  whenDrained(): Promise<void> { return this.drain.whenDrained() }
   resize(cols: number, rows: number): void {
     this.desiredSize = { cols, rows }
     this.applyResizeOrRetry()
@@ -218,6 +253,10 @@ export class LocalPtySession extends BaseSession {
   protected writeRaw(data: string): void {
     if (!this.proc) throw new Error('The session has not started a local process')
     this.proc.write(data)
+  }
+
+  override drain(): Promise<void> {
+    return this.proc?.whenDrained?.() ?? Promise.resolve()
   }
 
   resize(cols: number, rows: number): void {

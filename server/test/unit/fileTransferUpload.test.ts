@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { bus } from '../../src/core/events.js'
 import { FileTransfer } from '../../src/core/FileTransfer.js'
 import { SessionOpLock } from '../../src/core/SessionOpLock.js'
+import { extractEchoProofMarker } from '../helpers/echoProofMarker.js'
 import { MockSession } from '../helpers/mockSession.js'
 
 describe('FileTransfer upload scripted', () => {
@@ -31,6 +32,7 @@ describe('FileTransfer upload scripted', () => {
       s.resize = () => {}
 
       const data = Buffer.from('hi')
+      const encoded = codecName === 'xxd' ? data.toString('hex') : data.toString('base64')
       const origWrite = s.write.bind(s)
       s.write = (chunk: string, opts?) => {
         origWrite(chunk, opts)
@@ -38,14 +40,20 @@ describe('FileTransfer upload scripted', () => {
           queueMicrotask(() => s.feed(`SP_CODEC:${codecName}\n$ `))
           return
         }
-        if (chunk.includes('stty cols')) {
+        if (chunk.includes('stty cols') || chunk.includes('stty -echo') || chunk.includes('stty echo')) {
           queueMicrotask(() => s.feed('$ '))
           return
         }
-        if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
-          const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-          queueMicrotask(() => s.feed(`${m}\n$ `))
+        if (chunk.includes('SP_SZ')) {
+          queueMicrotask(() => s.feed(`SP_SZ:${encoded.length}\n$ `))
           return
+        }
+        if (chunk.includes("printf '\\n%s%s\\n'")) {
+          const marker = extractEchoProofMarker(chunk)
+          if (marker) {
+            queueMicrotask(() => s.feed(`${marker}\n$ `))
+            return
+          }
         }
         if (chunk.includes('SP_UP')) {
           queueMicrotask(() => { s.feed(`SP_UP:${data.length}\n$ `); s.forceState('WAITING_INPUT') })

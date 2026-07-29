@@ -67,20 +67,30 @@ class SessionManager {
   readonly fileTransfer = new FileTransfer(this, this.opLock)
   readonly remoteEdit = new RemoteEdit(this, this.opLock)
 
+  /**
+   * `session.data` fires once per output/input chunk — a burst upload/exec can raise
+   * hundreds of events within milliseconds. Buffering them and flushing in a single
+   * batched insert on the next microtask avoids hundreds of synchronous SQLite writes
+   * blocking the event loop, which previously starved the PTY reader and silently
+   * dropped input bytes under sustained write pressure (the PS2-hang failure mode).
+   */
+  private pendingHistory: Array<typeof schema.historyChunks.$inferInsert> = []
+  private historyFlushScheduled = false
+  /** AbortControllers for detached transfer/edit jobs, keyed by job ID; see execCancel. */
+  private readonly transferAborts = new Map<string, AbortController>()
+
   constructor() {
     this.opLock.setBusyDescriber((sid) => this.lockBusyMessage(sid))
-    // SQLite 同步写入，事件处理完成即已持久化。
     bus.on('session.data', (e) => {
-      db.insert(schema.historyChunks)
-        .values({
-          sessionId: e.sessionId,
-          seq: e.seq,
-          direction: e.direction,
-          dataRaw: e.raw,
-          dataPlain: e.plain,
-          createdAt: Date.now(),
-        })
-        .run()
+      this.pendingHistory.push({
+        sessionId: e.sessionId,
+        seq: e.seq,
+        direction: e.direction,
+        dataRaw: e.raw,
+        dataPlain: e.plain,
+        createdAt: Date.now(),
+      })
+      this.scheduleHistoryFlush()
     })
     bus.on('session.state', (e) => {
       db.update(schema.sessions)
@@ -110,6 +120,21 @@ class SessionManager {
       this.opLock.clear(e.sessionId)
       this.sessions.delete(e.sessionId)
     })
+  }
+
+  private scheduleHistoryFlush(): void {
+    if (this.historyFlushScheduled) return
+    this.historyFlushScheduled = true
+    setImmediate(() => this.flushHistory())
+  }
+
+  /** Synchronously persist any buffered history chunks; call before any history read. */
+  private flushHistory(): void {
+    this.historyFlushScheduled = false
+    if (this.pendingHistory.length === 0) return
+    const batch = this.pendingHistory
+    this.pendingHistory = []
+    db.insert(schema.historyChunks).values(batch).run()
   }
 
   /** 服务重启后，将库中残留的"活跃"会话标记为断开 */
@@ -246,6 +271,7 @@ class SessionManager {
 
   /** 增量读取纯文本历史（从 data_raw 重算，避免旧 data_plain 把 \\r 误当成换行） */
   history(sessionId: string, since = 0, limit = 2000): { cursor: number; text: string } {
+    this.flushHistory()
     const chunks = db
       .select()
       .from(schema.historyChunks)
@@ -268,6 +294,7 @@ class SessionManager {
 
   /** 读取原始 ANSI 历史（Web 端重放用），限制总量 */
   rawHistory(sessionId: string, maxBytes = 512 * 1024): string {
+    this.flushHistory()
     const chunks = db
       .select()
       .from(schema.historyChunks)
@@ -379,13 +406,18 @@ class SessionManager {
     return { job: current, output: text, cursor, done }
   }
 
-  /** 取消一个 exec 作业：向 PTY 发送 Ctrl+C，并标记为 CANCELED。 */
+  /**
+   * 取消一个作业：向 PTY 发送 Ctrl+C 并标记为 CANCELED。对 transfer/edit 作业额外
+   * 触发 AbortController，让其内部等待循环立即退出而不是空等到 timeoutMs 才释放
+   * opLock（此前取消一个卡在 PS2 里的上传，锁要等满 120s 超时才释放）。
+   */
   async execCancel(jobId: string): Promise<JobSnapshot> {
     const job = this.jobs.get(jobId)
     if (!job) throw new TransferError('Job not found', 404)
     if (job.status === 'DONE' || job.status === 'CANCELED' || job.status === 'DISCONNECTED') {
       return job
     }
+    this.transferAborts.get(jobId)?.abort()
     const session = this.sessions.get(job.sessionId)
     if (session && !session.isClosed()) {
       try { session.write('\u0003') } catch { /* session may be closing */ }
@@ -490,7 +522,9 @@ class SessionManager {
   ): JobSnapshot {
     const timeoutMs = opts.timeoutMs ?? config.transferTimeoutMs
     const job = this.jobs.create(session.id, 'upload', { remotePath, startSeq: session.lastSeq, timeoutMs })
-    void this.runUploadJob(job, session, remotePath, data, opts)
+    const controller = new AbortController()
+    this.transferAborts.set(job.id, controller)
+    void this.runUploadJob(job, session, remotePath, data, { ...opts, signal: controller.signal })
     return this.jobs.get(job.id) ?? job
   }
 
@@ -502,7 +536,9 @@ class SessionManager {
     timeoutMs = config.transferTimeoutMs,
   ): JobSnapshot {
     const job = this.jobs.create(session.id, 'download', { remotePath, startSeq: session.lastSeq, timeoutMs })
-    void this.runDownloadJob(job, session, remotePath, outputLocalPath, timeoutMs)
+    const controller = new AbortController()
+    this.transferAborts.set(job.id, controller)
+    void this.runDownloadJob(job, session, remotePath, outputLocalPath, timeoutMs, controller.signal)
     return this.jobs.get(job.id) ?? job
   }
 
@@ -514,36 +550,64 @@ class SessionManager {
     timeoutMs = config.editTimeoutMs,
   ): JobSnapshot {
     const job = this.jobs.create(session.id, 'edit', { remotePath, startSeq: session.lastSeq, timeoutMs })
-    void this.runEditJob(job, session, remotePath, edits, timeoutMs)
+    const controller = new AbortController()
+    this.transferAborts.set(job.id, controller)
+    void this.runEditJob(job, session, remotePath, edits, timeoutMs, controller.signal)
     return this.jobs.get(job.id) ?? job
   }
 
-  private async runUploadJob(job: JobSnapshot, session: BaseSession, remotePath: string, data: Buffer, opts: { timeoutMs?: number; expectedSha256?: string }): Promise<void> {
+  private async runUploadJob(
+    job: JobSnapshot,
+    session: BaseSession,
+    remotePath: string,
+    data: Buffer,
+    opts: { timeoutMs?: number; expectedSha256?: string; signal?: AbortSignal },
+  ): Promise<void> {
     try {
       const result = await this.fileTransfer.upload(session, remotePath, data, opts)
       this.jobs.settle(job.id, 'DONE', { state: session.state, result })
     } catch (error) {
       this.jobs.settle(job.id, 'FAILED', { state: session.state, error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      this.transferAborts.delete(job.id)
     }
   }
 
-  private async runDownloadJob(job: JobSnapshot, session: BaseSession, remotePath: string, outputLocalPath: string, timeoutMs: number): Promise<void> {
+  private async runDownloadJob(
+    job: JobSnapshot,
+    session: BaseSession,
+    remotePath: string,
+    outputLocalPath: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     try {
-      const result = await this.fileTransfer.download(session, remotePath, timeoutMs)
+      const result = await this.fileTransfer.download(session, remotePath, timeoutMs, signal)
       fs.writeFileSync(outputLocalPath, Buffer.from(result.data))
       const meta: Record<string, unknown> = { ...result, data: undefined, output: outputLocalPath }
       this.jobs.settle(job.id, 'DONE', { state: session.state, result: meta })
     } catch (error) {
       this.jobs.settle(job.id, 'FAILED', { state: session.state, error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      this.transferAborts.delete(job.id)
     }
   }
 
-  private async runEditJob(job: JobSnapshot, session: BaseSession, remotePath: string, edits: TextEdit[], timeoutMs: number): Promise<void> {
+  private async runEditJob(
+    job: JobSnapshot,
+    session: BaseSession,
+    remotePath: string,
+    edits: TextEdit[],
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     try {
-      const result = await this.remoteEdit.edit(session, remotePath, edits, timeoutMs)
+      const result = await this.remoteEdit.edit(session, remotePath, edits, timeoutMs, signal)
       this.jobs.settle(job.id, 'DONE', { state: session.state, result })
     } catch (error) {
       this.jobs.settle(job.id, 'FAILED', { state: session.state, error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      this.transferAborts.delete(job.id)
     }
   }
 
@@ -556,6 +620,9 @@ class SessionManager {
     if (live) {
       live.close('Deleted from the Web UI')
     }
+    // Flush before deleting so a still-pending batch cannot resurrect rows for a
+    // session record we are about to remove.
+    this.flushHistory()
     const row = db.select().from(schema.sessions).where(eq(schema.sessions.id, sessionId)).get()
     if (!row && !live) return false
     db.delete(schema.historyChunks).where(eq(schema.historyChunks.sessionId, sessionId)).run()

@@ -3,6 +3,7 @@ import { bus } from '../../src/core/events.js'
 import { extractMarkedPayload, FileTransfer } from '../../src/core/FileTransfer.js'
 import { SessionOpLock } from '../../src/core/SessionOpLock.js'
 import { TransferError } from '../../src/core/TransferError.js'
+import { extractEchoProofMarker } from '../helpers/echoProofMarker.js'
 import { MockSession } from '../helpers/mockSession.js'
 import { sleep } from '../helpers/wait.js'
 
@@ -119,6 +120,7 @@ describe('abnormal slow / partial PTY', () => {
     s.forceState('WAITING_INPUT')
     s.resize = () => {}
     const data = Buffer.from('hi')
+    const encoded = data.toString('base64')
 
     let hang = true
     const orig = s.write.bind(s)
@@ -129,14 +131,19 @@ describe('abnormal slow / partial PTY', () => {
           s.feed('SP_CODEC:base64\n$ ')
           return
         }
-        if (chunk.includes('stty cols')) {
+        if (chunk.includes('stty cols') || chunk.includes('stty -echo') || chunk.includes('stty echo')) {
           s.feed('$ ')
           return
         }
-        if (chunk.includes('SP_DRAIN_') || chunk.includes('SP_S_')) {
+        if (chunk.includes('SP_SZ')) {
+          // staging always succeeds; only the drain/finalize step hangs
+          s.feed(`SP_SZ:${encoded.length}\n$ `)
+          return
+        }
+        if (chunk.includes("printf '\\n%s%s\\n'")) {
           if (!hang) {
-            const m = chunk.match(/SP_(?:DRAIN|S)_[A-Za-z0-9_]+/)?.[0]
-            s.feed(`${m}\n$ `)
+            const marker = extractEchoProofMarker(chunk)
+            if (marker) s.feed(`${marker}\n$ `)
           }
           return
         }

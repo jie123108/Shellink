@@ -24,6 +24,15 @@ The GitHub Release body is generated from the matching section in this file
 
 ### Removed
 
+## [0.2.2] - 2026-07-29
+
+### Fixed
+
+- Fix Bun PTY uploads (especially ~10KB+) that still hung in bash PS2 after 0.2.1: a single staged write of several `printf` lines (~2KB) overflowed the kernel tty input queue (`TTYHOG` ≈ 1024 bytes), which silently dropped mid-line bytes and left an unbalanced quote. Staging now sends **one line at a time** with an in-line ack marker, keeps each write under the queue limit, and only sends the next chunk after the previous ack is observed.
+- Fix transfer/edit status markers becoming undetectable after `stty -echo`: without local echo, shell prompts have no trailing newline, so markers could glue onto `$ $ $ ...` and miss line-anchored matching. Marker emitters (`echoProofEcho`, `SP_SZ` / `SP_UP` / `SP_DEC` / `SP_EDIT`) now print a leading newline via `printf`.
+- Harden the transfer path around the remaining failure modes: wait for drain under Bun stdin backpressure, batch session history writes (flush before history reads), abort in-flight transfers on cancel, verify staged encoded size before decode (retry once with a smaller chunk), and recover with Ctrl+C / restore echo / temp cleanup before surfacing upload errors.
+- Apply the same one-line-with-ack pacing to remote-edit staging so large edit payloads cannot overflow the tty queue either.
+
 ## [0.2.1] - 2026-07-28
 
 ### Fixed
