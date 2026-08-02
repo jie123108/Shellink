@@ -311,6 +311,33 @@ describe('TUI dashboard navigation', () => {
     expect(cleared).not.toContain('搜索:')
   })
 
+  it('recognizes kitty CSI-u encodings for list/search shortcuts', async () => {
+    const { dashboard } = dashboardWith({
+      'sessions.list': [
+        { id: 'a1', state: 'WAITING_INPUT', mode: 'AUTO', profileName: 'production' },
+        { id: 'b2', state: 'IDLE', mode: 'AUTO', profileName: 'staging' },
+      ],
+      'profiles.list': [{ id: 'p1', name: 'jump', connectType: 'ssh', host: 'h' }],
+    })
+    await dashboard.refresh()
+
+    // `/` as CSI-u starts search; letter keys as CSI-u type into the draft
+    dashboard.handleInput('\x1b[47u')
+    dashboard.handleInput('\x1b[112u') // p
+    dashboard.handleInput('\x1b[114u') // r
+    dashboard.handleInput('\x1b[111u') // o
+    dashboard.handleInput('\x1b[100u') // d
+    expect(stripAnsi(dashboard.render(100).join('\n'))).toContain('/prod')
+    expect(stripAnsi(dashboard.render(100).join('\n'))).toContain('production')
+
+    dashboard.handleInput('\x1b[27u') // Escape cancels
+    expect(stripAnsi(dashboard.render(100).join('\n'))).toContain('staging')
+
+    // `2` as CSI-u switches to profiles
+    dashboard.handleInput('\x1b[50u')
+    await vi.waitFor(() => expect(stripAnsi(dashboard.render(100).join('\n'))).toContain('jump'))
+  })
+
   it('exits an empty search with Backspace and restores the previous filter', async () => {
     const { dashboard } = dashboardWith({
       'sessions.list': [

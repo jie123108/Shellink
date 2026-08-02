@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import {
+  decodeKittyPrintable,
+  isKeyRelease,
   Loader,
   matchesKey,
   ProcessTerminal,
@@ -156,10 +158,29 @@ class HelpOverlay implements Component {
   }
 
   handleInput(data: string): void {
-    if (data === '?' || data === 'q' || matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c') || matchesKey(data, 'enter')) {
+    if (
+      matchesKey(data, '?') ||
+      matchesKey(data, 'q') ||
+      matchesKey(data, 'escape') ||
+      matchesKey(data, 'ctrl+c') ||
+      matchesKey(data, 'enter')
+    ) {
       this.onClose()
     }
   }
+}
+
+/** Plain text for search / letter bindings under kitty CSI-u (e.g. `\x1b[97u` → `a`). */
+function printableInput(data: string): string {
+  const kitty = decodeKittyPrintable(data)
+  if (kitty !== undefined) return kitty
+  if ([...data].some((ch) => {
+    const code = ch.charCodeAt(0)
+    return code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f)
+  })) {
+    return ''
+  }
+  return data
 }
 
 export class Dashboard implements Component {
@@ -398,23 +419,26 @@ export class Dashboard implements Component {
   }
 
   handleInput(data: string): void {
+    if (isKeyRelease(data)) return
     if (this.searchMode) { this.handleSearchInput(data); return }
-    if (data === '?') { this.toggleHelp(); return }
-    if (data === '/') { this.beginSearch(); return }
-    if (data === 'q' || matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) return this.onQuit?.()
-    if (data === '\t' || matchesKey(data, 'tab')) { this.switchView(this.view === 'sessions' ? 'profiles' : 'sessions'); return }
-    if (data === '1') { this.switchView('sessions'); return }
-    if (data === '2') { this.switchView('profiles'); return }
-    if (data === 'h' || matchesKey(data, 'left')) { this.switchView('sessions'); return }
-    if (data === 'l' || matchesKey(data, 'right')) { this.switchView('profiles'); return }
-    if (data === 'r') { void this.refresh(); return }
+    // Prefer matchesKey so kitty CSI-u / modifyOtherKeys encodings work the same
+    // as legacy bytes (e.g. `\x1b[113u` for `q`, `\x1b[93;5u` for Ctrl+]).
+    if (matchesKey(data, '?')) { this.toggleHelp(); return }
+    if (matchesKey(data, '/')) { this.beginSearch(); return }
+    if (matchesKey(data, 'q') || matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) return this.onQuit?.()
+    if (matchesKey(data, 'tab')) { this.switchView(this.view === 'sessions' ? 'profiles' : 'sessions'); return }
+    if (matchesKey(data, '1')) { this.switchView('sessions'); return }
+    if (matchesKey(data, '2')) { this.switchView('profiles'); return }
+    if (matchesKey(data, 'h') || matchesKey(data, 'left')) { this.switchView('sessions'); return }
+    if (matchesKey(data, 'l') || matchesKey(data, 'right')) { this.switchView('profiles'); return }
+    if (matchesKey(data, 'r')) { void this.refresh(); return }
     if (this.items.length === 0) { this.rerender(); return }
-    if (data === 'j' || matchesKey(data, 'down')) this.moveSelection(1)
-    else if (data === 'k' || matchesKey(data, 'up')) this.moveSelection(-1)
+    if (matchesKey(data, 'j') || matchesKey(data, 'down')) this.moveSelection(1)
+    else if (matchesKey(data, 'k') || matchesKey(data, 'up')) this.moveSelection(-1)
     else if (matchesKey(data, 'pageUp')) this.selected = Math.max(0, this.selected - this.visibleCount())
     else if (matchesKey(data, 'pageDown')) this.selected = Math.min(this.items.length - 1, this.selected + this.visibleCount())
-    else if (data === 'g' || matchesKey(data, 'home')) this.selected = 0
-    else if (data === 'G' || matchesKey(data, 'end')) this.selected = this.items.length - 1
+    else if (matchesKey(data, 'g') || matchesKey(data, 'home')) this.selected = 0
+    else if (matchesKey(data, 'shift+g') || matchesKey(data, 'end')) this.selected = this.items.length - 1
     else if (matchesKey(data, 'enter')) {
       const id = this.items[this.selected]?.id
       if (typeof id === 'string') {
@@ -505,36 +529,37 @@ export class Dashboard implements Component {
     }
     if (this.items.length > 0) {
       let navigated = true
-      if (matchesKey(data, 'down') || data === '\x0e') this.moveSelection(1)
-      else if (matchesKey(data, 'up') || data === '\x10') this.moveSelection(-1)
+      if (matchesKey(data, 'down') || matchesKey(data, 'ctrl+n')) this.moveSelection(1)
+      else if (matchesKey(data, 'up') || matchesKey(data, 'ctrl+p')) this.moveSelection(-1)
       else if (matchesKey(data, 'pageUp')) this.selected = Math.max(0, this.selected - this.visibleCount())
       else if (matchesKey(data, 'pageDown')) this.selected = Math.min(this.items.length - 1, this.selected + this.visibleCount())
       else if (matchesKey(data, 'home')) this.selected = 0
       else if (matchesKey(data, 'end')) this.selected = this.items.length - 1
-      else if (data.startsWith('\x1b[') || data.startsWith('\x1bO')) return
       else navigated = false
       if (navigated) {
         this.keepSelectionVisible()
         this.rerender()
         return
       }
-    } else if (data.startsWith('\x1b[') || data.startsWith('\x1bO')) return
+    }
     if (matchesKey(data, 'enter')) {
       this.searchMode = false
       this.searchQuery = this.searchDraft
       this.applySearch(this.searchQuery, false)
       return
     }
-    if (data === '\x7f' || data === '\b') {
+    if (matchesKey(data, 'backspace')) {
       if (!this.searchDraft) {
         this.cancelSearch()
         return
       }
       this.searchDraft = Array.from(this.searchDraft).slice(0, -1).join('')
-    } else if (data === '\x15') {
+    } else if (matchesKey(data, 'ctrl+u')) {
       this.searchDraft = ''
     } else {
-      const printable = data.replace(/[\x00-\x1f\x7f]/g, '')
+      // Decode kitty CSI-u printables before the control-char filter; otherwise
+      // `\x1b[97u` is rejected (contains ESC) or swallowed as an unknown CSI.
+      const printable = printableInput(data)
       if (!printable) return
       this.searchDraft += printable
     }
@@ -658,18 +683,23 @@ export class TerminalScreen implements Component {
   }
 
   handleInput(data: string): void {
-    if (data === '\u001d') { this.onExit?.(); return }
+    // Kitty reports press+release; never forward releases into the remote PTY.
+    if (isKeyRelease(data)) return
+    // Use matchesKey so kitty CSI-u / xterm modifyOtherKeys encodings of Ctrl+]
+    // and Ctrl+\ are recognized; raw `\x1d`/`\x1c` alone misses `\x1b[93;5u` etc.
+    // and those sequences get forwarded into the PTY as literal `3;5u`.
+    if (matchesKey(data, 'ctrl+]')) { this.onExit?.(); return }
     if (!this.manual) {
-      if (data === '\x1b[5~') { this.terminal.scrollPages(-1); this.rerender(); return }
-      if (data === '\x1b[6~') { this.terminal.scrollPages(1); this.rerender(); return }
-      if (data === '\x1b[H' || data === '\x1bOH') { this.terminal.scrollToTop(); this.rerender(); return }
-      if (data === '\x1b[F' || data === '\x1bOF') { this.terminal.scrollToBottom(); this.rerender(); return }
+      if (matchesKey(data, 'pageUp')) { this.terminal.scrollPages(-1); this.rerender(); return }
+      if (matchesKey(data, 'pageDown')) { this.terminal.scrollPages(1); this.rerender(); return }
+      if (matchesKey(data, 'home')) { this.terminal.scrollToTop(); this.rerender(); return }
+      if (matchesKey(data, 'end')) { this.terminal.scrollToBottom(); this.rerender(); return }
     }
-    if (!this.manual && data === 'm') {
+    if (!this.manual && matchesKey(data, 'm')) {
       void this.client.request('sessions.mode', { id: this.sessionId, mode: 'MANUAL' }).then(() => { this.manual = true; this.tookControl = true; this.rerender() })
       return
     }
-    if (this.manual && data === '\x1c') {
+    if (this.manual && matchesKey(data, 'ctrl+\\')) {
       void this.client.request('sessions.mode', { id: this.sessionId, mode: 'AUTO' }).then(() => {
         this.manual = false
         this.tookControl = false
@@ -687,7 +717,12 @@ export class TerminalScreen implements Component {
     ) {
       return
     }
-    if (this.manual) void this.client.request('sessions.input', { id: this.sessionId, text: data, appendNewline: false, manual: true }).catch(() => {})
+    if (this.manual) {
+      // Decode kitty CSI-u printables (`\x1b[97u` → `a`) before forwarding; leave
+      // traditional CSI arrows / enter / etc. unchanged for the remote shell.
+      const text = printableInput(data) || data
+      void this.client.request('sessions.input', { id: this.sessionId, text, appendNewline: false, manual: true }).catch(() => {})
+    }
   }
 
   private onEvent(event: RpcEvent): void {

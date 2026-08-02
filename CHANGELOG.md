@@ -34,6 +34,7 @@ The GitHub Release body is generated from the matching section in this file
 
 - Web UI: append the filename when uploading to a directory path (`…/`).
 - Clear post-transfer input junk and stop forwarding xterm OSC replies, so MANUAL Enter no longer runs stray `11` / `rgb:…` commands.
+- CLI TUI: recognize kitty CSI-u / modifyOtherKeys encodings for shortcuts (Ctrl+], Ctrl+\, search, navigation) so they work outside legacy terminals.
 - Web UI: fix Manual Control switch contrast and stop clipping the last terminal row.
 
 ## [0.2.2] - 2026-07-29

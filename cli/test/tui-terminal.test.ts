@@ -76,6 +76,35 @@ describe('headless terminal rendering', () => {
     expect(unsubscribe).toHaveBeenCalled()
   })
 
+  it('recognizes kitty CSI-u encodings of Ctrl+] and Ctrl+\\', async () => {
+    const subscribe = vi.fn(async () => ({ initial: { state: { mode: 'MANUAL' }, replay: '' }, unsubscribe: vi.fn(async () => {}) }))
+    const request = vi.fn(async () => ({ ok: true }))
+    const onExit = vi.fn()
+    const screen = new TerminalScreen({ subscribe, request } as unknown as SocketClient, 'kitty-session', vi.fn(), 'en-US')
+    screen.onExit = onExit
+    await screen.start()
+
+    // Kitty progressive enhancement: Ctrl+] → CSI 93 ; 5 u (not legacy \x1d)
+    screen.handleInput('\x1b[93;5u')
+    expect(onExit).toHaveBeenCalledTimes(1)
+    expect(request).not.toHaveBeenCalledWith('sessions.input', expect.anything())
+
+    request.mockClear()
+    // Ctrl+\ → CSI 92 ; 5 u
+    screen.handleInput('\x1b[92;5u')
+    await vi.waitFor(() => expect(request).toHaveBeenCalledWith('sessions.mode', { id: 'kitty-session', mode: 'AUTO' }))
+    expect(request).not.toHaveBeenCalledWith('sessions.input', expect.anything())
+
+    // xterm modifyOtherKeys form should also work
+    request.mockClear()
+    onExit.mockClear()
+    screen.handleInput('\x1b[27;5;93~')
+    expect(onExit).toHaveBeenCalledTimes(1)
+    expect(request).not.toHaveBeenCalledWith('sessions.input', expect.anything())
+
+    await screen.close()
+  })
+
   it('still forwards letter m while in MANUAL mode', async () => {
     const subscribe = vi.fn(async () => ({ initial: { state: { mode: 'MANUAL' }, replay: '' }, unsubscribe: vi.fn(async () => {}) }))
     const request = vi.fn(async () => ({ ok: true }))
@@ -90,6 +119,16 @@ describe('headless terminal rendering', () => {
       manual: true,
     })
     expect(request).not.toHaveBeenCalledWith('sessions.mode', expect.anything())
+
+    // Kitty CSI-u printable must be decoded before forwarding to the PTY
+    request.mockClear()
+    screen.handleInput('\x1b[97u')
+    expect(request).toHaveBeenCalledWith('sessions.input', {
+      id: 'manual-session',
+      text: 'a',
+      appendNewline: false,
+      manual: true,
+    })
     await screen.close()
   })
 })
