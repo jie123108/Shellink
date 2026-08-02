@@ -30,11 +30,16 @@ export class SessionService {
     const parsed = sessionHistorySchema.safeParse(input)
     if (!parsed.success) throw new AppError(RpcErrorCode.INVALID_REQUEST, 'Invalid parameters', 400, parsed.error.flatten())
     this.assertRecord(parsed.data.id)
-    const result = sessionManager.history(parsed.data.id, parsed.data.since, parsed.data.limit)
+    const result = sessionManager.history(parsed.data.id, parsed.data.since, parsed.data.limit, {
+      includeInternal: parsed.data.includeInternal,
+    })
     return { cursor: result.cursor, text: collapseBase64Payloads(result.text) }
   }
 
-  rawHistory(id: string) { this.assertRecord(id); return sessionManager.rawHistory(id) }
+  rawHistory(id: string) {
+    this.assertRecord(id)
+    return sessionManager.rawHistory(id, undefined, { includeInternal: false })
+  }
 
   input(input: unknown) {
     const parsed = sessionInputSchema.safeParse(input)

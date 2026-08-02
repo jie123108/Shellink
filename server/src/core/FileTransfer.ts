@@ -277,6 +277,29 @@ export class FileTransfer {
   }
 
   /**
+   * Leave the internal-transfer region and restore a visible prompt.
+   * Must endInternal before the final stty/prompt so observers (Web/history)
+   * are not left glued to the pre-transfer prompt line.
+   */
+  private async finishInternalTransfer(
+    session: BaseSession,
+    opts: { restoreEcho?: boolean; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    session.endInternal()
+    if (opts.restoreEcho) {
+      // Only needed after stty -echo uploads: drop OSC color replies etc. that
+      // landed in the readline buffer, then restore echo so its prompt is public.
+      session.discardPendingLine()
+      await this.execCapture(session, 'stty echo 2>/dev/null || true', 10_000, opts.signal).catch(() => {})
+      await this.settleWaitingInput(session, 5_000, opts.signal)
+    } else {
+      // Download path has no stty -echo; inject a display-only break so the
+      // next public prompt/command is not glued to the hidden region.
+      session.emitDisplayOutput('\r\n')
+    }
+  }
+
+  /**
    * Send Ctrl+C and give the shell a moment to settle, then best-effort restore local
    * echo and remove staging files. Must run before every upload error is thrown:
    * a bash PS2 continuation (`>`) still satisfies the default prompt regex, so without
@@ -449,72 +472,77 @@ export class FileTransfer {
     this.assertReady(session)
 
     return this.opLock.withLock(session.id, async () => {
-      const startAt = Date.now()
-      const codec = await this.probeCodec(session, timeoutMs, signal)
-      this.assertReady(session)
-
-      const token = crypto.randomUUID().replace(/-/g, '')
-      const begin = `SPB_${token}`
-      const end = `SPE_${token}`
-      const quoted = shellQuote(pathClean)
-
-      const stat = await this.execCapture(
-        session,
-        `if [ ! -f ${quoted} ]; then echo SP_STAT:missing; elif [ ! -r ${quoted} ]; then echo SP_STAT:unreadable; else echo SP_STAT:ok:$(wc -c < ${quoted} | tr -d ' '); fi`,
-        Math.min(timeoutMs, 30_000),
-        signal,
-      )
-      if (stat.timedOut) throw new TransferError(signal?.aborted ? 'Download canceled' : 'Timed out checking the remote file', signal?.aborted ? 499 : 504)
-      // 必须行首匹配并取最后一次：命令回显里含 echo SP_STAT:unreadable 字面量
-      const sm = lastLineMarker(stat.output, /SP_STAT:(missing|unreadable|ok:(\d+))/)
-      if (!sm) throw new TransferError('Unable to read the remote file status', 502)
-      if (sm[1] === 'missing') throw new TransferError('Remote file not found', 404)
-      if (sm[1] === 'unreadable') throw new TransferError('Remote file is unreadable', 502)
-      const remoteSize = Number(sm[2])
-      if (!Number.isFinite(remoteSize) || remoteSize < 0) {
-        throw new TransferError('Unable to parse the remote file size', 502)
-      }
-      if (remoteSize > config.transferMaxBytes) {
-        throw new TransferError(
-          `File is too large (${remoteSize} bytes); limit is ${config.transferMaxBytes} bytes`,
-          413,
-        )
-      }
-
-      this.assertReady(session)
-      const remaining = Math.max(timeoutMs - (Date.now() - startAt), 5_000)
-      const enc = await this.execCapture(
-        session,
-        `printf '%s\\n' '${begin}'; ${codec.encodeCmd(quoted, pathClean)}; printf '\\n%s\\n' '${end}'`,
-        remaining,
-        signal,
-      )
-      if (enc.timedOut) throw new TransferError(signal?.aborted ? 'Download canceled' : 'Download encoding timed out', signal?.aborted ? 499 : 504)
-
-      const payload = extractMarkedPayload(enc.output, begin, end)
-      let data: Buffer
+      session.beginInternal()
       try {
-        data = codec.decodeLocal(payload)
-      } catch {
-        throw new TransferError('Unable to decode remote data', 502)
-      }
-      if (data.length !== remoteSize) {
-        throw new TransferError(
-          `Downloaded size mismatch: expected ${remoteSize}, got ${data.length}`,
-          502,
-        )
-      }
-      if (data.length > config.transferMaxBytes) {
-        throw new TransferError(`File is too large; limit is ${config.transferMaxBytes} bytes`, 413)
-      }
+        const startAt = Date.now()
+        const codec = await this.probeCodec(session, timeoutMs, signal)
+        this.assertReady(session)
 
-      return {
-        remotePath: pathClean,
-        data,
-        size: data.length,
-        sha256: sha256Hex(data),
-        codec: codec.name,
-        durationMs: Date.now() - startAt,
+        const token = crypto.randomUUID().replace(/-/g, '')
+        const begin = `SPB_${token}`
+        const end = `SPE_${token}`
+        const quoted = shellQuote(pathClean)
+
+        const stat = await this.execCapture(
+          session,
+          `if [ ! -f ${quoted} ]; then echo SP_STAT:missing; elif [ ! -r ${quoted} ]; then echo SP_STAT:unreadable; else echo SP_STAT:ok:$(wc -c < ${quoted} | tr -d ' '); fi`,
+          Math.min(timeoutMs, 30_000),
+          signal,
+        )
+        if (stat.timedOut) throw new TransferError(signal?.aborted ? 'Download canceled' : 'Timed out checking the remote file', signal?.aborted ? 499 : 504)
+        // 必须行首匹配并取最后一次：命令回显里含 echo SP_STAT:unreadable 字面量
+        const sm = lastLineMarker(stat.output, /SP_STAT:(missing|unreadable|ok:(\d+))/)
+        if (!sm) throw new TransferError('Unable to read the remote file status', 502)
+        if (sm[1] === 'missing') throw new TransferError('Remote file not found', 404)
+        if (sm[1] === 'unreadable') throw new TransferError('Remote file is unreadable', 502)
+        const remoteSize = Number(sm[2])
+        if (!Number.isFinite(remoteSize) || remoteSize < 0) {
+          throw new TransferError('Unable to parse the remote file size', 502)
+        }
+        if (remoteSize > config.transferMaxBytes) {
+          throw new TransferError(
+            `File is too large (${remoteSize} bytes); limit is ${config.transferMaxBytes} bytes`,
+            413,
+          )
+        }
+
+        this.assertReady(session)
+        const remaining = Math.max(timeoutMs - (Date.now() - startAt), 5_000)
+        const enc = await this.execCapture(
+          session,
+          `printf '%s\\n' '${begin}'; ${codec.encodeCmd(quoted, pathClean)}; printf '\\n%s\\n' '${end}'`,
+          remaining,
+          signal,
+        )
+        if (enc.timedOut) throw new TransferError(signal?.aborted ? 'Download canceled' : 'Download encoding timed out', signal?.aborted ? 499 : 504)
+
+        const payload = extractMarkedPayload(enc.output, begin, end)
+        let data: Buffer
+        try {
+          data = codec.decodeLocal(payload)
+        } catch {
+          throw new TransferError('Unable to decode remote data', 502)
+        }
+        if (data.length !== remoteSize) {
+          throw new TransferError(
+            `Downloaded size mismatch: expected ${remoteSize}, got ${data.length}`,
+            502,
+          )
+        }
+        if (data.length > config.transferMaxBytes) {
+          throw new TransferError(`File is too large; limit is ${config.transferMaxBytes} bytes`, 413)
+        }
+
+        return {
+          remotePath: pathClean,
+          data,
+          size: data.length,
+          sha256: sha256Hex(data),
+          codec: codec.name,
+          durationMs: Date.now() - startAt,
+        }
+      } finally {
+        await this.finishInternalTransfer(session, { signal }).catch(() => {})
       }
     })
   }
@@ -542,93 +570,98 @@ export class FileTransfer {
     }
 
     return this.opLock.withLock(session.id, async () => {
-      const startAt = Date.now()
-      // Widen before any long probe/transfer command — Bun LocalPty cannot ioctl-resize,
-      // and jump-host shells often stay at 80 columns.
-      await this.widenPty(session, timeoutMs, signal)
-      this.assertReady(session)
-
-      const codec = await this.probeCodec(session, timeoutMs, signal)
-      this.assertReady(session)
-
-      const token = crypto.randomUUID().replace(/-/g, '').slice(0, 8)
-      const quotedDest = shellQuote(pathClean)
-      const tmpName = `/tmp/x${token}`
-      const quotedTmp = shellQuote(tmpName)
-      const b64Name = `/tmp/b${token}`
-      const quotedB64 = shellQuote(b64Name)
-      const encoded = codec.encodeLocal(data)
-
-      // Local echo doubles round-trip volume and lets the PTY's echo of `echo <marker>`
-      // race the real marker output; turning it off is best-effort (some shells lack a
-      // real tty) and echo-proof markers below remain correct either way.
-      await this.execCapture(session, 'stty -echo 2>/dev/null || true', Math.min(timeoutMs, 10_000), signal).catch(() => {})
-
+      session.beginInternal()
       try {
-        // Stage the base64 payload and verify its staged size before decoding, retrying
-        // once with a smaller chunk on corruption instead of silently decoding garbage.
-        await this.stageEncodedPayload(session, quotedB64, encoded, token, timeoutMs, startAt, signal)
+        const startAt = Date.now()
+        // Widen before any long probe/transfer command — Bun LocalPty cannot ioctl-resize,
+        // and jump-host shells often stay at 80 columns.
+        await this.widenPty(session, timeoutMs, signal)
+        this.assertReady(session)
 
-        // Drain the printf queue before finalize. waitForStable would resolve on
-        // intermediate prompts between printfs while finalize is still buffered.
-        const drain = `SP_DRAIN_${token}`
-        let startSeq = session.lastSeq
-        session.write(`${echoProofEcho(drain)}\n`)
-        const remaining = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
-        const drainWait = await this.waitForOutputMarker(session, startSeq, drain, remaining, signal)
-        if (drainWait.timedOut) {
-          throw new TransferError(signal?.aborted ? 'Upload canceled' : 'Upload decoding timed out', signal?.aborted ? 499 : 504)
-        }
+        const codec = await this.probeCodec(session, timeoutMs, signal)
+        this.assertReady(session)
 
-        const decode = codec.decodeFileCmd(quotedB64, quotedTmp, b64Name, tmpName)
-        const finalizeCmd = [
-          `${decode}`,
-          `rm -f ${quotedB64}`,
-          `mv -f ${quotedTmp} ${quotedDest} 2>/dev/null || { cp ${quotedTmp} ${quotedDest} && rm -f ${quotedTmp}; }`,
-          // Leading \n: local echo is still off here, so a bare `echo` can land
-          // glued to a no-newline `$ ` prompt and silently fail the line-anchored match.
-          `printf '\\nSP_UP:%s\\n' "$(wc -c < ${quotedDest} | tr -d ' ')"`,
-        ].join('; ')
-        startSeq = session.lastSeq
-        session.write(`${finalizeCmd}\n`)
-        const verifyTimeoutMs = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
-        const { text: verifyOutput, timedOut } = await this.waitForOutputMarker(
-          session,
-          startSeq,
-          /SP_UP:\d+/,
-          verifyTimeoutMs,
-          signal,
-        )
-        if (timedOut) {
-          throw new TransferError(signal?.aborted ? 'Upload canceled' : 'Upload decoding timed out', signal?.aborted ? 499 : 504)
-        }
+        const token = crypto.randomUUID().replace(/-/g, '').slice(0, 8)
+        const quotedDest = shellQuote(pathClean)
+        const tmpName = `/tmp/x${token}`
+        const quotedTmp = shellQuote(tmpName)
+        const b64Name = `/tmp/b${token}`
+        const quotedB64 = shellQuote(b64Name)
+        const encoded = codec.encodeLocal(data)
 
-        // Marker can appear while still OUTPUTTING; wait for the prompt so the
-        // next transfer/exec does not see a transient non-WAITING_INPUT 409.
-        await this.settleWaitingInput(session, 5_000, signal)
+        // Local echo doubles round-trip volume and lets the PTY's echo of `echo <marker>`
+        // race the real marker output; turning it off is best-effort (some shells lack a
+        // real tty) and echo-proof markers below remain correct either way.
+        await this.execCapture(session, 'stty -echo 2>/dev/null || true', Math.min(timeoutMs, 10_000), signal).catch(() => {})
 
-        const vm = lastLineMarker(verifyOutput, /SP_UP:(\d+)/)
-        if (!vm) throw new TransferError('Unable to verify the remote file size after upload', 502)
-        const remoteSize = Number(vm[1])
-        if (remoteSize !== data.length) {
-          throw new TransferError(
-            `Uploaded size mismatch: expected ${data.length}, remote size is ${remoteSize}`,
-            502,
+        try {
+          // Stage the base64 payload and verify its staged size before decoding, retrying
+          // once with a smaller chunk on corruption instead of silently decoding garbage.
+          await this.stageEncodedPayload(session, quotedB64, encoded, token, timeoutMs, startAt, signal)
+
+          // Drain the printf queue before finalize. waitForStable would resolve on
+          // intermediate prompts between printfs while finalize is still buffered.
+          const drain = `SP_DRAIN_${token}`
+          let startSeq = session.lastSeq
+          session.write(`${echoProofEcho(drain)}\n`)
+          const remaining = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
+          const drainWait = await this.waitForOutputMarker(session, startSeq, drain, remaining, signal)
+          if (drainWait.timedOut) {
+            throw new TransferError(signal?.aborted ? 'Upload canceled' : 'Upload decoding timed out', signal?.aborted ? 499 : 504)
+          }
+
+          const decode = codec.decodeFileCmd(quotedB64, quotedTmp, b64Name, tmpName)
+          const finalizeCmd = [
+            `${decode}`,
+            `rm -f ${quotedB64}`,
+            `mv -f ${quotedTmp} ${quotedDest} 2>/dev/null || { cp ${quotedTmp} ${quotedDest} && rm -f ${quotedTmp}; }`,
+            // Leading \n: local echo is still off here, so a bare `echo` can land
+            // glued to a no-newline `$ ` prompt and silently fail the line-anchored match.
+            `printf '\\nSP_UP:%s\\n' "$(wc -c < ${quotedDest} | tr -d ' ')"`,
+          ].join('; ')
+          startSeq = session.lastSeq
+          session.write(`${finalizeCmd}\n`)
+          const verifyTimeoutMs = Math.max(timeoutMs - (Date.now() - startAt), 10_000)
+          const { text: verifyOutput, timedOut } = await this.waitForOutputMarker(
+            session,
+            startSeq,
+            /SP_UP:\d+/,
+            verifyTimeoutMs,
+            signal,
           )
-        }
+          if (timedOut) {
+            throw new TransferError(signal?.aborted ? 'Upload canceled' : 'Upload decoding timed out', signal?.aborted ? 499 : 504)
+          }
 
-        return {
-          remotePath: pathClean,
-          size: data.length,
-          sha256: digest,
-          codec: codec.name,
-          durationMs: Date.now() - startAt,
+          // Marker can appear while still OUTPUTTING; wait for the prompt so the
+          // next transfer/exec does not see a transient non-WAITING_INPUT 409.
+          await this.settleWaitingInput(session, 5_000, signal)
+
+          const vm = lastLineMarker(verifyOutput, /SP_UP:(\d+)/)
+          if (!vm) throw new TransferError('Unable to verify the remote file size after upload', 502)
+          const remoteSize = Number(vm[1])
+          if (remoteSize !== data.length) {
+            throw new TransferError(
+              `Uploaded size mismatch: expected ${data.length}, remote size is ${remoteSize}`,
+              502,
+            )
+          }
+
+          return {
+            remotePath: pathClean,
+            size: data.length,
+            sha256: digest,
+            codec: codec.name,
+            durationMs: Date.now() - startAt,
+          }
+        } catch (err) {
+          await this.recoverPrompt(session, { tempPaths: [quotedB64, quotedTmp] })
+          throw err
         }
-      } catch (err) {
-        await this.recoverPrompt(session, { tempPaths: [quotedB64, quotedTmp] })
-        throw err
       } finally {
-        await this.execCapture(session, 'stty echo 2>/dev/null || true', 10_000).catch(() => {})
+        // Drop junk buffered while echo was off, then restore echo *outside*
+        // the internal region so the resulting prompt is visible in Web/history.
+        await this.finishInternalTransfer(session, { restoreEcho: true, signal }).catch(() => {})
       }
     })
   }

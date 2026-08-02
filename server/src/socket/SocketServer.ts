@@ -89,10 +89,45 @@ export class ShellinkSocketServer {
       addSubscription: (sessionId, replay) => {
         const subscriptionId = crypto.randomUUID()
         const handlers: Array<[SubscriptionEventName, (event: any) => void]> = []
+        // Per-subscription: hide transfer/edit protocol traffic from live terminal sinks.
+        let hidingInternal = false
         for (const name of subscriptionEventNames) {
           const handler = (data: any) => {
             if (sessionId && data.sessionId !== sessionId) return
-            if (name === 'session.data' && data.direction !== 'output') return
+            if (name === 'session.data') {
+              if (data.direction !== 'output') return
+              if (data.internal) {
+                if (!hidingInternal) {
+                  hidingInternal = true
+                  send(FrameKind.Event, {
+                    subscriptionId,
+                    event: name,
+                    data: {
+                      sessionId: data.sessionId,
+                      direction: 'output',
+                      raw: '\r\n[shellink] file transfer in progress...\r\n',
+                      plain: '\n[shellink] file transfer in progress...\n',
+                      internal: false,
+                    },
+                  } satisfies RpcEvent)
+                }
+                return
+              }
+              if (hidingInternal) {
+                hidingInternal = false
+                send(FrameKind.Event, {
+                  subscriptionId,
+                  event: name,
+                  data: {
+                    sessionId: data.sessionId,
+                    direction: 'output',
+                    raw: '\r\n[shellink] transfer output hidden\r\n',
+                    plain: '\n[shellink] transfer output hidden\n',
+                    internal: false,
+                  },
+                } satisfies RpcEvent)
+              }
+            }
             const event: RpcEvent = { subscriptionId, event: name, data }
             if (typeof data.seq === 'number') event.seq = data.seq
             send(FrameKind.Event, event)

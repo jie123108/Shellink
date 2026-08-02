@@ -677,6 +677,16 @@ export class TerminalScreen implements Component {
       })
       return
     }
+    // Drop xterm automatic OSC/DCS replies (color/title queries); they must not reach the PTY.
+    if (
+      data.startsWith('\x1b]') ||
+      data.startsWith('\x1bP') ||
+      data.startsWith('\x1b_') ||
+      data.startsWith('\x1b^') ||
+      data.startsWith('\x1bX')
+    ) {
+      return
+    }
     if (this.manual) void this.client.request('sessions.input', { id: this.sessionId, text: data, appendNewline: false, manual: true }).catch(() => {})
   }
 

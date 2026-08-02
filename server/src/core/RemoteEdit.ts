@@ -548,14 +548,25 @@ export class RemoteEdit {
     this.assertReady(session)
 
     return this.opLock.withLock(session.id, async () => {
-      const startAt = Date.now()
-      const engine = await this.probeEngine(session, timeoutMs, signal)
-      this.assertReady(session)
+      session.beginInternal()
+      try {
+        const startAt = Date.now()
+        const engine = await this.probeEngine(session, timeoutMs, signal)
+        this.assertReady(session)
 
-      if (engine === 'python3' || engine === 'python') {
-        return this.runPythonEdit(session, engine, pathClean, edits, timeoutMs, startAt, signal)
+        if (engine === 'python3' || engine === 'python') {
+          return this.runPythonEdit(session, engine, pathClean, edits, timeoutMs, startAt, signal)
+        }
+        return this.runSedEdit(session, pathClean, edits, timeoutMs, startAt, signal)
+      } finally {
+        // Clear buffered OSC junk, leave the internal region, then restore echo
+        // publicly so the prompt is visible again in Web/history.
+        session.discardPendingLine()
+        session.endInternal()
+        if (!session.isClosed() && session.state !== 'DISCONNECTED') {
+          await this.execCapture(session, 'stty echo 2>/dev/null || true', 10_000, signal).catch(() => {})
+        }
       }
-      return this.runSedEdit(session, pathClean, edits, timeoutMs, startAt, signal)
     })
   }
 }

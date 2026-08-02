@@ -48,6 +48,33 @@ export interface ExecStatusResult {
   done: boolean
 }
 
+/** Collapse consecutive internal output chunks into a single human-readable placeholder. */
+export function renderHistoryWithoutInternal(
+  chunks: Array<{ dataRaw: string; internal?: number | null }>,
+  opts: { newline?: '\n' | '\r\n' } = {},
+): string {
+  const nl = opts.newline ?? '\n'
+  let out = ''
+  let hidden = 0
+  const flushHidden = () => {
+    if (hidden <= 0) return
+    // Leading newline: the last public chunk is often a prompt with no trailing \n,
+    // so without this the placeholder glues onto `user@host$ `.
+    out += `${nl}[shellink] hidden ${hidden} internal transfer output chunks${nl}`
+    hidden = 0
+  }
+  for (const chunk of chunks) {
+    if (chunk.internal) {
+      hidden += 1
+      continue
+    }
+    flushHidden()
+    out += chunk.dataRaw
+  }
+  flushHidden()
+  return out
+}
+
 /** 8 位字母数字会话 ID（排除易混淆字符 0/O/1/I/l） */
 const SESSION_ID_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz'
 
@@ -88,6 +115,7 @@ class SessionManager {
         direction: e.direction,
         dataRaw: e.raw,
         dataPlain: e.plain,
+        internal: e.internal ? 1 : 0,
         createdAt: Date.now(),
       })
       this.scheduleHistoryFlush()
@@ -269,9 +297,19 @@ class SessionManager {
     })
   }
 
-  /** 增量读取纯文本历史（从 data_raw 重算，避免旧 data_plain 把 \\r 误当成换行） */
-  history(sessionId: string, since = 0, limit = 2000): { cursor: number; text: string } {
+  /**
+   * 增量读取纯文本历史（从 data_raw 重算，避免旧 data_plain 把 \\r 误当成换行）。
+   * `includeInternal` 默认 true：FileTransfer/RemoteEdit/exec 解析需要完整 PTY 流；
+   * 展示路径传 false，把连续内部段折叠成一行占位摘要。
+   */
+  history(
+    sessionId: string,
+    since = 0,
+    limit = 2000,
+    opts: { includeInternal?: boolean } = {},
+  ): { cursor: number; text: string } {
     this.flushHistory()
+    const includeInternal = opts.includeInternal !== false
     const chunks = db
       .select()
       .from(schema.historyChunks)
@@ -284,17 +322,22 @@ class SessionManager {
       .orderBy(asc(schema.historyChunks.seq))
       .limit(limit)
       .all() as HistoryChunkRow[]
-    const raw = chunks
-      .filter((c) => c.direction === 'output')
-      .map((c) => c.dataRaw)
-      .join('')
-    const cursor = chunks.length > 0 ? chunks[chunks.length - 1].seq : since
+    const outputs = chunks.filter((c) => c.direction === 'output')
+    const raw = includeInternal
+      ? outputs.map((c) => c.dataRaw).join('')
+      : renderHistoryWithoutInternal(outputs)
+    const cursor = chunks.length > 0 ? chunks[chunks.length - 1]!.seq : since
     return { cursor, text: stripAnsi(raw) }
   }
 
   /** 读取原始 ANSI 历史（Web 端重放用），限制总量 */
-  rawHistory(sessionId: string, maxBytes = 512 * 1024): string {
+  rawHistory(
+    sessionId: string,
+    maxBytes = 512 * 1024,
+    opts: { includeInternal?: boolean } = {},
+  ): string {
     this.flushHistory()
+    const includeInternal = opts.includeInternal !== false
     const chunks = db
       .select()
       .from(schema.historyChunks)
@@ -305,13 +348,18 @@ class SessionManager {
         ),
       )
       .orderBy(asc(schema.historyChunks.seq))
-      .all()
+      .all() as HistoryChunkRow[]
+    if (!includeInternal) {
+      // CRLF so xterm replay advances to column 0 (bare \n leaves the cursor mid-line).
+      const filtered = renderHistoryWithoutInternal(chunks, { newline: '\r\n' })
+      return filtered.length > maxBytes ? filtered.slice(-maxBytes) : filtered
+    }
     let total = 0
     const parts: string[] = []
     for (let i = chunks.length - 1; i >= 0; i--) {
-      total += chunks[i].dataRaw.length
+      total += chunks[i]!.dataRaw.length
       if (total > maxBytes) break
-      parts.unshift(chunks[i].dataRaw)
+      parts.unshift(chunks[i]!.dataRaw)
     }
     return parts.join('')
   }

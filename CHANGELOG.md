@@ -26,10 +26,15 @@ The GitHub Release body is generated from the matching section in this file
 
 ## [0.2.3] - 2026-08-02
 
+### Changed
+
+- Hide PTY transfer/edit protocol noise from history and live terminals (one-line summary; use `--include-internal` to debug).
+
 ### Fixed
 
-- Web UI: improve Manual Control switch contrast on the dark terminal toolbar across themes (off rail uses a clearer light overlay; on rail uses `--terminal-cursor` instead of a near-invisible soft accent).
-- Web UI: stop clipping the last terminal row when the cursor is at the bottom — FitAddon now measures an unpadded host so parent padding + `border-box` no longer over-counts rows.
+- Web UI: append the filename when uploading to a directory path (`…/`).
+- Clear post-transfer input junk and stop forwarding xterm OSC replies, so MANUAL Enter no longer runs stray `11` / `rgb:…` commands.
+- Web UI: fix Manual Control switch contrast and stop clipping the last terminal row.
 
 ## [0.2.2] - 2026-07-29
 

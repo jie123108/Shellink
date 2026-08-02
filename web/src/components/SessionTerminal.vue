@@ -136,11 +136,27 @@ async function doDownload() {
   }
 }
 
+/** If the target is a directory (trailing slash), append the upload file's basename. */
+function resolveUploadRemotePath(remotePath: string, fileName: string): string {
+  const path = remotePath.trim()
+  const base = fileName.split(/[/\\]/).filter(Boolean).pop() || fileName.trim()
+  if (!path || !base) return path
+  if (path.endsWith('/') || path.endsWith('\\')) return `${path}${base}`
+  return path
+}
+
 function onUploadChange(options: { fileList: UploadFileInfo[] }) {
   uploadFileList.value = options.fileList.slice(-1)
   const file = uploadFileList.value[0]?.file
-  if (file && !uploadPath.value.trim()) {
+  if (!file) return
+  const current = uploadPath.value.trim()
+  if (!current) {
     uploadPath.value = `/tmp/${file.name}`
+    return
+  }
+  // Selecting a file while the path is a directory: show the resolved target immediately.
+  if (current.endsWith('/') || current.endsWith('\\')) {
+    uploadPath.value = resolveUploadRemotePath(current, file.name)
   }
 }
 
@@ -155,9 +171,11 @@ async function doUpload() {
     message.warning(t('session.uploadFileRequired'))
     return
   }
+  const remotePath = resolveUploadRemotePath(path, file.name)
+  if (remotePath !== path) uploadPath.value = remotePath
   transferring.value = true
   try {
-    const result = await uploadSessionFile(props.sessionId, path, file)
+    const result = await uploadSessionFile(props.sessionId, remotePath, file)
     message.success(t('session.uploaded', { path: result.remotePath, size: result.size }))
     showUpload.value = false
   } catch (e) {
@@ -210,7 +228,19 @@ onMounted(() => {
   fitIfVisible()
 
   // Forward keyboard input while manually controlling the session or entering an OTP during connection.
+  // Never forward xterm's automatic replies to OSC/DCS queries (e.g. color reports like
+  // ESC]11;rgb:...ESC\) — those look like typed input and become `11: command not found`
+  // after the next Enter.
   term.onData((data) => {
+    if (
+      data.startsWith('\x1b]') ||
+      data.startsWith('\x1bP') ||
+      data.startsWith('\x1b_') ||
+      data.startsWith('\x1b^') ||
+      data.startsWith('\x1bX')
+    ) {
+      return
+    }
     if (mode.value === 'MANUAL' || state.value === 'CONNECTING') {
       ws?.send(JSON.stringify({ type: 'input', data }))
     }
@@ -332,7 +362,7 @@ onBeforeUnmount(() => {
         <NFormItem :label="t('session.remoteTargetPath')" required>
           <NInput
             v-model:value="uploadPath"
-            placeholder="/tmp/filename"
+            placeholder="/tmp/filename or /tmp/"
             :disabled="transferring"
           />
         </NFormItem>

@@ -62,7 +62,7 @@ const help = {
   list                                              列出会话
   create --profile ID [--cols N] [--rows N]         使用配置创建会话
   state <session-id>                                查询会话状态
-  history <session-id> [--since CURSOR] [--limit N] 读取会话历史
+  history <session-id> [--since CURSOR] [--limit N] [--include-internal] 读取会话历史
   input <session-id> --text TEXT [--no-newline]     写入文本
   exec <session-id> --command COMMAND [--timeout MS] [--detach] 执行命令
   exec-status <job-id> [--since CURSOR] [--wait MS]           查询 detach 作业状态（长轮询）
@@ -147,7 +147,7 @@ Commands:
   list                                              List sessions
   create --profile ID [--cols N] [--rows N]         Create a session from a profile
   state <session-id>                                Show session state
-  history <session-id> [--since CURSOR] [--limit N] Read session history
+  history <session-id> [--since CURSOR] [--limit N] [--include-internal] Read session history
   input <session-id> --text TEXT [--no-newline]     Write text
   exec <session-id> --command COMMAND [--timeout MS] [--detach] Run a command
   exec-status <job-id> [--since CURSOR] [--wait MS]          Poll a detached exec job

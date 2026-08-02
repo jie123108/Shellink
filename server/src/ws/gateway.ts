@@ -51,6 +51,8 @@ function handleTerminalConnection(ws: WebSocket, sessionId: string): void {
   const live = sessionManager.get(sessionId)
   // Collapse large upload/download base64 payloads in the live stream.
   const liveCollapse = createBase64CollapseStream()
+  // Hide transfer/edit protocol traffic from the live xterm; announce transitions only.
+  let hidingInternal = false
 
   // Replay collapsed history before attaching the live stream.
   let replay = ''
@@ -62,8 +64,19 @@ function handleTerminalConnection(ws: WebSocket, sessionId: string): void {
     mode: live?.mode ?? 'AUTO',
   })
 
-  const onData = (e: { sessionId: string; direction: string; raw: string }) => {
+  const onData = (e: { sessionId: string; direction: string; raw: string; internal?: boolean }) => {
     if (e.sessionId !== sessionId || e.direction !== 'output') return
+      if (e.internal) {
+      if (!hidingInternal) {
+        hidingInternal = true
+        send(ws, { type: 'data', data: '\r\n[shellink] file transfer in progress...\r\n' })
+      }
+      return
+    }
+    if (hidingInternal) {
+      hidingInternal = false
+      send(ws, { type: 'data', data: '\r\n[shellink] transfer output hidden\r\n' })
+    }
     const data = liveCollapse.push(e.raw)
     if (data) send(ws, { type: 'data', data })
   }

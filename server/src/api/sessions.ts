@@ -27,11 +27,14 @@ export function registerSessionRoutes(app: FastifyInstance): void {
   })
   app.get('/api/sessions/:id/history', async (req, reply) => {
     const id = (req.params as { id: string }).id
-    const query = req.query as { since?: string; limit?: string }
+    const query = req.query as { since?: string; limit?: string; includeInternal?: string }
     try {
       const since = query.since ? Number(query.since) : 0
       const limit = query.limit ? Number(query.limit) : 2000
-      return sessionService.history({ id, since, limit })
+      const includeInternal =
+        query.includeInternal === '1' ||
+        query.includeInternal === 'true'
+      return sessionService.history({ id, since, limit, includeInternal })
     } catch (error) { return sendError(reply, error) }
   })
   app.post('/api/sessions/:id/input', async (req, reply) => {

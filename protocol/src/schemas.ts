@@ -46,6 +46,8 @@ export const sessionHistorySchema = z.object({
   id: z.string().min(1),
   since: z.number().int().min(0).default(0),
   limit: z.number().int().min(1).max(10_000).default(2000),
+  /** When true, include transfer/edit protocol markers (SP_S_*, stty probes, …). Default hides them. */
+  includeInternal: z.boolean().default(false),
 })
 export const sessionInputSchema = z.object({
   id: z.string().min(1),

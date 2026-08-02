@@ -13,7 +13,7 @@ import { createProgressReporter } from './progress.js'
 const locale = resolveCliLocale()
 // `version` is intentionally not boolean so `shellink upgrade --version TAG` works;
 // bare `--version` / `-V` still become true when no value follows.
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'no-newline', 'yes', 'check', 'detach'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'no-newline', 'yes', 'check', 'detach', 'include-internal'])
 
 type Flags = Record<string, string | boolean>
 
@@ -182,7 +182,7 @@ async function handleRpc(words: string[], flags: Flags): Promise<void> {
     if (action === 'list') output(await client.request('sessions.list'), json)
     else if (action === 'create') output(await client.request('sessions.create', { profileId: required(flags.profile, '--profile'), cols: numberFlag(flags.cols), rows: numberFlag(flags.rows) }), json)
     else if (action === 'state') output(await client.request('sessions.state', { id: required(id, 'session ID') }), json)
-    else if (action === 'history') output(await client.request('sessions.history', { id: required(id, 'session ID'), since: numberFlag(flags.since, 0), limit: numberFlag(flags.limit, 2000) }), json)
+    else if (action === 'history') output(await client.request('sessions.history', { id: required(id, 'session ID'), since: numberFlag(flags.since, 0), limit: numberFlag(flags.limit, 2000), includeInternal: flags['include-internal'] === true }), json)
     else if (action === 'input') output(await client.request('sessions.input', { id: required(id, 'session ID'), text: required(flags.text, '--text'), appendNewline: flags['no-newline'] !== true }), json)
     else if (action === 'exec') {
       if (flags.detach === true) {

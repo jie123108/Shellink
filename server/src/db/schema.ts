@@ -60,6 +60,11 @@ export const historyChunks = sqliteTable('history_chunks', {
   dataRaw: text('data_raw').notNull(),
   /** ANSI-stripped plain text for AI consumption. */
   dataPlain: text('data_plain').notNull(),
+  /**
+   * 1 when produced by an internal transfer/edit PTY protocol (SP_* markers, staging
+   * printf bursts, stty probes). Display paths hide these; FileTransfer parsing keeps them.
+   */
+  internal: integer('internal').notNull().default(0),
   createdAt: integer('created_at').notNull(),
 })
 

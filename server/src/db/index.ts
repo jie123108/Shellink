@@ -25,6 +25,14 @@ if (runningOnBun) {
   db = drizzle(sqlite, { schema })
 }
 
+function tableHasColumn(table: string, column: string): boolean {
+  const sql = `PRAGMA table_info(${table})`
+  const rows = (runningOnBun
+    ? sqlite.query(sql).all()
+    : sqlite.prepare(sql).all()) as Array<{ name: string }>
+  return rows.some((row) => row.name === column)
+}
+
 sqlite.exec(`
 CREATE TABLE IF NOT EXISTS profiles (
   id TEXT PRIMARY KEY,
@@ -70,6 +78,7 @@ CREATE TABLE IF NOT EXISTS history_chunks (
   direction TEXT NOT NULL,
   data_raw TEXT NOT NULL,
   data_plain TEXT NOT NULL,
+  internal INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_history_session_seq ON history_chunks(session_id, seq);
@@ -81,6 +90,11 @@ CREATE TABLE IF NOT EXISTS webhooks (
   created_at INTEGER NOT NULL
 );
 `)
+
+// Idempotent upgrade for databases created before the internal column existed.
+if (!tableHasColumn('history_chunks', 'internal')) {
+  sqlite.exec('ALTER TABLE history_chunks ADD COLUMN internal INTEGER NOT NULL DEFAULT 0')
+}
 
 export { db, schema }
 

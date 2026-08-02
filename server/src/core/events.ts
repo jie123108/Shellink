@@ -8,6 +8,8 @@ export interface SessionDataEvent {
   direction: 'output' | 'input'
   raw: string
   plain: string
+  /** True for transfer/edit protocol traffic that display paths should hide. */
+  internal: boolean
 }
 
 export interface SessionStateEvent {

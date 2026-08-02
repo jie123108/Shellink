@@ -32,6 +32,10 @@ export abstract class BaseSession {
 
   /** Rolling plain-text buffer for prompt detection and the state API. */
   private recentPlain = ''
+  /** Non-internal output only — what Agents see via recentOutput(). */
+  private recentPublicPlain = ''
+  /** Nesting depth for transfer/edit protocol traffic (beginInternal/endInternal). */
+  private internalDepth = 0
   /** Until the first prompt is seen, keep the session in CONNECTING. */
   protected loginPhase = true
   private promptRegex: RegExp
@@ -50,6 +54,45 @@ export abstract class BaseSession {
   abstract resize(cols: number, rows: number): void
 
   abstract close(reason?: string): void
+
+  /** Mark subsequent input/output as internal transfer/edit protocol traffic. */
+  beginInternal(): void {
+    this.internalDepth += 1
+  }
+
+  /** Leave an internal transfer/edit region opened by beginInternal. */
+  endInternal(): void {
+    if (this.internalDepth > 0) this.internalDepth -= 1
+  }
+
+  /** Whether the session is currently recording internal protocol traffic. */
+  isInternal(): boolean {
+    return this.internalDepth > 0
+  }
+
+  /**
+   * Discard any partial line in the remote readline buffer (Ctrl+U).
+   * Used after stty -echo transfers: xterm OSC color replies can land as
+   * buffered input and otherwise execute as junk commands on the next Enter.
+   */
+  discardPendingLine(): void {
+    try {
+      this.write('\u0015', { record: false })
+    } catch {
+      // session may already be closed
+    }
+  }
+
+  /**
+   * Inject output into history/WS without writing to the PTY.
+   * Used to put a visual break after a hidden internal transfer region.
+   */
+  emitDisplayOutput(text: string): void {
+    if (this.closed || !text) return
+    const plain = stripAnsi(text)
+    this.appendRecent(plain)
+    this.recordChunk('output', text, plain)
+  }
 
   /** Write to the terminal (AI input / Web manual input / exec). */
   write(data: string, opts: { direction?: 'input'; record?: boolean } = {}): void {
@@ -129,9 +172,9 @@ export abstract class BaseSession {
     return Promise.resolve()
   }
 
-  /** Return the last N lines of recent plain output. */
+  /** Return the last N lines of recent plain output (excluding internal transfer traffic). */
   recentOutput(maxLines = 15): string {
-    const lines = this.recentPlain.split('\n')
+    const lines = this.recentPublicPlain.split('\n')
     return lines.slice(-maxLines).join('\n')
   }
 
@@ -162,6 +205,7 @@ export abstract class BaseSession {
       direction,
       raw,
       plain,
+      internal: this.internalDepth > 0,
     })
   }
 
@@ -180,7 +224,11 @@ export abstract class BaseSession {
   // ---------- Internals ----------
 
   private appendRecent(plain: string): void {
+    // Prompt detection must see the real PTY stream, including transfer markers.
     this.recentPlain = (this.recentPlain + plain).slice(-16_384)
+    if (this.internalDepth === 0) {
+      this.recentPublicPlain = (this.recentPublicPlain + plain).slice(-16_384)
+    }
   }
 
   private resetSilenceTimer(): void {
