@@ -269,6 +269,7 @@ onBeforeUnmount(() => {
       <NSpace align="center">
         <span class="mode-label">{{ t('session.manualControl') }}</span>
         <NSwitch
+          class="mode-switch"
           size="small"
           :value="mode === 'MANUAL'"
           :disabled="state === 'DISCONNECTED'"
@@ -291,7 +292,9 @@ onBeforeUnmount(() => {
         </NPopconfirm>
       </NSpace>
     </div>
-    <div ref="termRef" class="terminal-wrap"></div>
+    <div class="terminal-wrap">
+      <div ref="termRef" class="terminal-host"></div>
+    </div>
 
     <NModal
       v-model:show="showDownload"
@@ -378,10 +381,26 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: var(--text-muted);
 }
+/* Switch sits on dark --terminal-panel. Naive sets --n-rail-* inline, so
+   paint the rail directly (inline vars would otherwise win over class vars). */
+.mode-switch :deep(.n-switch__rail) {
+  background-color: rgba(255, 255, 255, 0.28) !important;
+}
+.mode-switch.n-switch--active :deep(.n-switch__rail) {
+  background-color: var(--terminal-cursor) !important;
+}
 .terminal-wrap {
   flex: 1;
   min-height: 0;
   padding: 10px 0 6px 12px;
+  overflow: hidden;
   background: var(--terminal-bg);
+}
+/* Unpadded host so FitAddon measures usable space (parent padding + border-box
+   otherwise over-counts rows and clips the bottom line). */
+.terminal-host {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 </style>
