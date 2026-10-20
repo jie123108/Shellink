@@ -18,6 +18,7 @@ import type { RpcEvent } from '@shellink/protocol'
 import { SocketClient } from './SocketClient.js'
 import { resolveCliLocale, t, type CliLocale } from './i18n.js'
 import { formatSessionStartedAt } from './time.js'
+import { remoteTerminalInput } from './terminal-input.js'
 import {
   accent,
   bold,
@@ -718,9 +719,8 @@ export class TerminalScreen implements Component {
       return
     }
     if (this.manual) {
-      // Decode kitty CSI-u printables (`\x1b[97u` → `a`) before forwarding; leave
-      // traditional CSI arrows / enter / etc. unchanged for the remote shell.
-      const text = printableInput(data) || data
+      const text = remoteTerminalInput(data, this.terminal.modes.applicationCursorKeysMode)
+      if (!text) return
       void this.client.request('sessions.input', { id: this.sessionId, text, appendNewline: false, manual: true }).catch(() => {})
     }
   }

@@ -131,4 +131,76 @@ describe('headless terminal rendering', () => {
     })
     await screen.close()
   })
+
+  it.each([
+    ['down press from Ghostty', '\x1b[1;1:1B', '\x1b[B'],
+    ['down repeat from Ghostty', '\x1b[1;1:2B', '\x1b[B'],
+    ['up press', '\x1b[1;1:1A', '\x1b[A'],
+    ['up repeat', '\x1b[1;1:2A', '\x1b[A'],
+    ['right repeat', '\x1b[1;1:2C', '\x1b[C'],
+    ['left repeat', '\x1b[1;1:2D', '\x1b[D'],
+    ['Ctrl+down repeat', '\x1b[1;5:2B', '\x1b[1;5B'],
+    ['down with Caps Lock', '\x1b[1;65:1B', '\x1b[B'],
+    ['Home', '\x1b[1;1:1H', '\x1b[H'],
+    ['End', '\x1b[1;1:1F', '\x1b[F'],
+    ['PageUp repeat', '\x1b[5;1:2~', '\x1b[5~'],
+    ['PageDown repeat', '\x1b[6;1:2~', '\x1b[6~'],
+    ['Delete', '\x1b[3;1:1~', '\x1b[3~'],
+    ['F5 repeat', '\x1b[15;1:2~', '\x1b[15~'],
+    ['CSI-u Enter', '\x1b[13u', '\r'],
+    ['CSI-u Tab', '\x1b[9u', '\t'],
+    ['CSI-u Escape', '\x1b[27u', '\x1b'],
+    ['CSI-u Backspace', '\x1b[127u', '\x7f'],
+    ['CSI-u Ctrl+C', '\x1b[99;5u', '\x03'],
+    ['CSI-u Ctrl+U', '\x1b[117;5u', '\x15'],
+    ['CSI-u Ctrl+Space', '\x1b[32;5u', '\x00'],
+    ['CSI-u Alt+x', '\x1b[120;3u', '\x1bx'],
+    ['CSI-u Shift+Tab', '\x1b[9;2u', '\x1b[Z'],
+    ['CSI-u shifted letter', '\x1b[97:65;2u', 'A'],
+    ['CSI-u Unicode', '\x1b[20013u', '中'],
+    ['modifyOtherKeys Ctrl+C', '\x1b[27;5;99~', '\x03'],
+    ['modifyOtherKeys Enter', '\x1b[27;1;13~', '\r'],
+    ['legacy down', '\x1b[B', '\x1b[B'],
+    ['legacy application down', '\x1bOB', '\x1bOB'],
+    ['legacy Ctrl+up', '\x1b[1;5A', '\x1b[1;5A'],
+    ['raw control', '\x03', '\x03'],
+    ['pasted text containing an event sequence', '\x1b[200~text\x1b[1;1:2B\x1b[201~', '\x1b[200~text\x1b[1;1:2B\x1b[201~'],
+  ])('forwards %s as legacy terminal input', async (_label, input, expected) => {
+    const subscribe = vi.fn(async () => ({ initial: { state: { mode: 'MANUAL' }, replay: '' }, unsubscribe: vi.fn(async () => {}) }))
+    const request = vi.fn(async () => ({ ok: true }))
+    const screen = new TerminalScreen({ subscribe, request } as unknown as SocketClient, 'keys-session', vi.fn(), 'en-US')
+    await screen.start()
+
+    screen.handleInput(input)
+    expect(request).toHaveBeenCalledWith('sessions.input', {
+      id: 'keys-session', text: expected, appendNewline: false, manual: true,
+    })
+    await screen.close()
+  })
+
+  it.each(['\x1b[1;1:3B', '\x1b[1;1:3A', '\x1b[13;1:3u', '\x1b[97;1:3u', '\x1b[6;1:3~'])(
+    'does not forward key releases %j', async (input) => {
+      const subscribe = vi.fn(async () => ({ initial: { state: { mode: 'MANUAL' }, replay: '' }, unsubscribe: vi.fn(async () => {}) }))
+      const request = vi.fn(async () => ({ ok: true }))
+      const screen = new TerminalScreen({ subscribe, request } as unknown as SocketClient, 'release-session', vi.fn(), 'en-US')
+      await screen.start()
+      screen.handleInput(input)
+      expect(request).not.toHaveBeenCalledWith('sessions.input', expect.anything())
+      await screen.close()
+    },
+  )
+
+  it('uses application cursor sequences when the remote application enables DECCKM', async () => {
+    const subscribe = vi.fn(async () => ({ initial: { state: { mode: 'MANUAL' }, replay: '\x1b[?1hready' }, unsubscribe: vi.fn(async () => {}) }))
+    const request = vi.fn(async () => ({ ok: true }))
+    const screen = new TerminalScreen({ subscribe, request } as unknown as SocketClient, 'application-session', vi.fn(), 'en-US')
+    await screen.start()
+    await vi.waitFor(() => expect(screen.render(80).join('\n')).toContain('ready'))
+
+    screen.handleInput('\x1b[1;1:2B')
+    expect(request).toHaveBeenCalledWith('sessions.input', {
+      id: 'application-session', text: '\x1bOB', appendNewline: false, manual: true,
+    })
+    await screen.close()
+  })
 })
